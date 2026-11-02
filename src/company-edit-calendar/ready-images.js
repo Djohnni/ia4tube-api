@@ -37,7 +37,7 @@ async function normalizeReadyImage(file) {
 
 function createReadyImageService(ports) {
   const { enabled, root, directories, contextFile, read, write, ticketContext, ownerClient,
-    acquireAllocationLock, admit, bind, orderRoot, clock, fault } = ports;
+    acquireAllocationLock, admit, bind, orderRoot, clock, fault, remainingImages } = ports;
   const directory = path.join(root, "ready-images");
   function inspect(ticket) {
     if (!enabled) fail("admission_disabled", 503);
@@ -48,6 +48,16 @@ function createReadyImageService(ports) {
     return row;
   }
   function verifyCapability(ticket) { inspect(ticket); return hash(ticket); }
+  async function context(ticket) {
+    let row = inspect(ticket);
+    if (row.expiresAt <= clock()) fail("context_expired");
+    const remaining = await remainingImages({ owner: row.owner, verifiedClaims: row.sessionIdentity,
+      ipIdentity: row.ipIdentity, freeArtBlocked: row.freeArtBlocked });
+    row = inspect(ticket);
+    if (row.expiresAt <= clock()) fail("context_expired");
+    return { ok: true, requestId: row.id, date: row.request.date, time: row.request.time,
+      remainingImages: Number.isSafeInteger(remaining) && remaining >= 0 ? remaining : null };
+  }
   function canEdit(ticket) {
     try {
       const row = inspect(ticket), current = ownerClient({ whatsapp: row.owner });
@@ -163,7 +173,7 @@ function createReadyImageService(ports) {
       return response(row);
     } finally { release(); }
   }
-  return Object.freeze({ verifyCapability, canEdit, submit });
+  return Object.freeze({ verifyCapability, context, canEdit, submit });
 }
 
 module.exports = { createReadyImageService, normalizeReadyImage, MAX_INPUT_BYTES, READY_IMAGE_MODEL_ID };

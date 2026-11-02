@@ -109,7 +109,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret, clock, fault });
   const readyImages = require("./ready-images").createReadyImageService({ enabled: admissionEnabled, root, directories,
     contextFile, read, write: atomicWriteJson, ticketContext, ownerClient, acquireAllocationLock: acquireLock,
-    admit: admission.admit, bind, orderRoot, clock, fault });
+    admit: admission.admit, remainingImages: admission.remainingImages, bind, orderRoot, clock, fault });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock()); directories();
     const id = request.requestId, digest = hash(JSON.stringify(request));
@@ -268,7 +268,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
   }
   return Object.freeze({ createContext, bind, admit: admission.admit, admissionStatus: admission.status,
     verifyReadyImageCapability: readyImages.verifyCapability, readyImageCanEdit: readyImages.canEdit,
-    submitReadyImage: readyImages.submit,
+    readReadyImageContext: readyImages.context, submitReadyImage: readyImages.submit,
     verifyAdmissionCapability: admission.verifyCapability, availability: admission.availability,
     cancelAdmission: admission.cancel, close() { admission.close(); key.fill(0); } });
 }

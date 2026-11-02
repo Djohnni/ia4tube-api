@@ -90,7 +90,27 @@ function createEditAdmissionService(ports) {
     const quota = billing.getMediaQuotaStatus(copy, now);
     const image = quota.monthly.image.remaining, video = quota.monthly.video.remaining;
     if (![image, video, standalone].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error("availability_billing_invalid");
-    return { image: image + standalone >= 1, video: video + standalone >= 1, freeFeature: status.arte_gratis_ativa === true };
+    return { image: image + standalone >= 1, video: video + standalone >= 1,
+      imageCount: image + standalone, freeFeature: status.arte_gratis_ativa === true };
+  }
+  // A read-only hint for the new photo list. It never creates/migrates a free grant.
+  // The legacy availability wire format remains unchanged for installed Android apps.
+  async function remainingImages({ owner, verifiedClaims, ipIdentity = null, freeArtBlocked = false }) {
+    let current = ownerClient({ whatsapp: owner }), measured;
+    try { measured = readPaidAvailability(current.client); } catch { return null; }
+    if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount;
+    if (!verifiedClaims || typeof observeConnection !== "function") return null;
+    let connection;
+    try { connection = await observeConnection(verifiedClaims); } catch { return null; }
+    // Another request may have spent a quota while the existing connection was read.
+    current = ownerClient({ whatsapp: owner });
+    try {
+      measured = readPaidAvailability(current.client);
+      if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount;
+      const free = inspectFreeClaim(owner, current.client, connection, ledger(),
+        { ipIdentity, blocked: freeArtBlocked });
+      return measured.imageCount + Number(Boolean(free));
+    } catch { return null; }
   }
   async function availability(claims, policy = {}) {
     let current = ownerClient(claims);
@@ -370,7 +390,7 @@ function createEditAdmissionService(ports) {
       write(contextFile(row.id), row); return response(row);
     } finally { release(); }
   }
-  return Object.freeze({ admit, status, cancel, availability, verifyCapability, assertBind, prepareBind, finishBind,
+  return Object.freeze({ admit, status, cancel, availability, remainingImages, verifyCapability, assertBind, prepareBind, finishBind,
     claimIdentity(row) { return { schema: 2, contextId: row.id, admissionId: row.admission.admissionId, requestHash: row.admission.requestHash }; },
     close() { key.fill(0); } });
 }

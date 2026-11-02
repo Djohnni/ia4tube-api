@@ -32,27 +32,35 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
   }));
   const readyGuard = createCapabilityRateGuard({ capacity: 20,
     verifyCapability: body => service.verifyReadyImageCapability(body.ticket) });
-  router.post("/empresa/edit/ready-images", (req, res, next) => {
+  const readyImageHeader = (req, res, next) => {
     try {
       const header = req.get("Authorization"), match = typeof header === "string" && header.match(/^EditTicket ([A-Za-z0-9_.-]{80})$/);
       if (!match) throw Object.assign(new Error("Sessão necessária"), { statusCode: 401, code: "edit_calendar_session_required" });
       readyGuard.authorize({ body: { ticket: match[1] }, ip: req.ip, socket: req.socket });
       req.readyImageTicket = match[1];
-      if (typeof readyImageUpload !== "function") throw Object.assign(new Error("Indisponível"),
-        { statusCode: 503, code: "edit_calendar_admission_disabled" });
       next();
     } catch (error) {
       if (error.statusCode === 429) res.set("Retry-After", String(error.retryAfter || 1));
       res.status(error.statusCode || 403).set("Cache-Control", "no-store")
         .json({ ok: false, code: error.code || "edit_calendar_context_unavailable" });
     }
-  }, (req, res, next) => readyImageUpload(req, res, error => {
+  };
+  router.get("/empresa/edit/ready-images/context", readyImageHeader, call(req => {
+    if (Object.keys(req.query).length) throw Object.assign(new Error("Consulta inválida"),
+      { statusCode: 400, code: "edit_calendar_input_invalid" });
+    return service.readReadyImageContext(req.readyImageTicket);
+  }));
+  router.post("/empresa/edit/ready-images", readyImageHeader, (req, res, next) => {
+    if (typeof readyImageUpload !== "function") return res.status(503).set("Cache-Control", "no-store")
+      .json({ ok: false, code: "edit_calendar_admission_disabled" });
+    return readyImageUpload(req, res, error => {
     if (!error) return next();
     readyImageCleanup(req.file);
     return res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).set("Cache-Control", "no-store")
       .json({ ok: false, code: "edit_calendar_ready_image_invalid", error: "Confira a imagem e tente novamente.",
         ...(service.readyImageCanEdit(req.readyImageTicket) === true ? { safeToEdit: true } : {}) });
-  }), call(async req => {
+    });
+  }, call(async req => {
     try {
       if (req.body?.ticket !== req.readyImageTicket) throw Object.assign(new Error("Sessão divergente"),
         { statusCode: 403, code: "edit_calendar_context_unavailable" });
