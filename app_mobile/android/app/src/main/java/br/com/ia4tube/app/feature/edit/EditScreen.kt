@@ -23,6 +23,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
@@ -41,6 +42,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
@@ -59,6 +62,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -239,8 +243,8 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
         }
         browser.deferredCalendarRequest?.let { (target, document, mainFrame) ->
             browser.deferredCalendarRequest = null
-            EditCalendarPolicy.requestId(target, document, mainFrame, calendar.nonce)
-                ?.let { calendar.request(it, session.getToken()) }
+            EditCalendarPolicy.request(target, document, mainFrame, calendar.nonce)
+                ?.let { calendar.request(it.requestId, session.getToken(), it.mediaKind) }
         }
     }
     LaunchedEffect(calendar.nonce) {
@@ -366,8 +370,8 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
                                     return true
                                 }
                                 if (EditCalendarPolicy.isCallback(request.url.toString())) {
-                                    EditCalendarPolicy.requestId(request.url.toString(), view.url, request.isForMainFrame,
-                                        calendar.nonce)?.let { calendar.request(it, session.getToken()) }
+                                    EditCalendarPolicy.request(request.url.toString(), view.url, request.isForMainFrame,
+                                        calendar.nonce)?.let { calendar.request(it.requestId, session.getToken(), it.mediaKind) }
                                     // This is a native request, never a document navigation.
                                     return true
                                 }
@@ -455,6 +459,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
     if (calendar.choosingSchedule) {
         val suggestionCategory = remember(calendar.nonce) { editPostingTimeCategory(businessType()) }
         EditCalendarScheduleDialog(calendar.schedule, suggestionCategory, onDismiss = calendar::cancelSchedule,
+            mediaKind = calendar.mediaKind, showDestinations = calendar.showDestinations, destinationError = calendar.destinationError,
             onConfirm = { calendar.chooseSchedule(it, session.getToken()) })
     }
 }
@@ -462,12 +467,17 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
 @Composable
 internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggestionCategory: EditPostingTimeCategory,
     onDismiss: () -> Unit,
+    mediaKind: String? = null,
+    showDestinations: Boolean = true,
+    destinationError: String? = null,
     onConfirm: (EditCalendarSchedule) -> Unit) {
     val context = LocalContext.current
     val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
     var date by remember { mutableStateOf(initial?.let { LocalDate.parse(it.date) } ?: default.toLocalDate()) }
     var time by remember { mutableStateOf(initial?.let { LocalTime.parse(it.time) } ?: default.toLocalTime()) }
-    val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")))
+    var destination by remember { mutableStateOf(initial?.destination?.takeIf { it in setOf("feed", "story", "both") } ?: "both") }
+    val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")),
+        if (showDestinations) destination else "reel")
     val future = selection.isFuture()
     val appearance = calendarAppearance(MaterialTheme.colorScheme)
     val clockFormat = remember { DateTimeFormatter.ofPattern("HH:mm") }
@@ -497,6 +507,18 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
                     EditScheduleField("Hora", selection.time, EditScheduleClockIcon, Modifier.weight(1f), editTime)
                 }
             }
+            if (showDestinations) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    EditPlacementChoice(when (mediaKind) { "image" -> "Feed"; "video" -> "Reels"; else -> "Feed/Reels" },
+                        destination != "story", destination != "feed", Modifier.weight(1f)) { checked ->
+                        destination = if (checked) "both" else "story"
+                    }
+                    EditPlacementChoice("Story", destination != "feed", destination != "story", Modifier.weight(1f)) { checked ->
+                        destination = if (checked) "both" else "feed"
+                    }
+                }
+            }
+            if (destinationError != null) Text(destinationError, style = MaterialTheme.typography.bodySmall, color = appearance.error)
             Text("Sugestão de horário para você baseado no seu negócio", style = MaterialTheme.typography.bodyMedium)
             suggestionCategory.slots.forEach { slot ->
                 val window = editPostingTimeWindow(slot.time, date)
@@ -523,6 +545,20 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
                 onClick = { onConfirm(selection) }) { Text("Confirmar", fontWeight = FontWeight.SemiBold) }
         },
         dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = onDismiss) { Text("Voltar") } })
+}
+
+@Composable
+private fun EditPlacementChoice(label: String, checked: Boolean, enabled: Boolean, modifier: Modifier,
+    onCheckedChange: (Boolean) -> Unit) {
+    val appearance = calendarAppearance(MaterialTheme.colorScheme)
+    Row(modifier.heightIn(min = 48.dp).toggleable(value = checked, enabled = enabled,
+        role = Role.Checkbox, onValueChange = onCheckedChange), verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, enabled = enabled, onCheckedChange = null,
+            colors = CheckboxDefaults.colors(checkedColor = appearance.action,
+                checkmarkColor = appearance.surface, uncheckedColor = appearance.secondary,
+                disabledCheckedColor = appearance.action))
+        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    }
 }
 
 @Composable

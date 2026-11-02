@@ -26,12 +26,19 @@ internal class EditCalendarViewModel(
         private set
     var choosingSchedule by mutableStateOf(false)
         private set
+    var mediaKind by mutableStateOf<String?>(null)
+        private set
+    var showDestinations by mutableStateOf(true)
+        private set
+    var destinationError by mutableStateOf<String?>(null)
+        private set
     var busy by mutableStateOf(false)
         private set
     var reply by mutableStateOf<EditCalendarReply?>(null)
         private set
     private var accountKey: String? = null
     private var pendingRequest: String? = null
+    private var pendingMediaKind: String? = null
     private var job: Job? = null
     private val requestSchedules = mutableMapOf<String, EditCalendarSchedule>()
     private val client by lazy(clientFactory)
@@ -48,6 +55,10 @@ internal class EditCalendarViewModel(
             schedule = null
             choosingSchedule = false
             pendingRequest = null
+            pendingMediaKind = null
+            mediaKind = null
+            showDestinations = true
+            destinationError = null
             busy = false
             reply = null
             requestSchedules.clear()
@@ -55,27 +66,42 @@ internal class EditCalendarViewModel(
         return changed
     }
 
-    fun openSchedule() { if (!busy) choosingSchedule = true }
+    fun openSchedule() {
+        if (!busy) { mediaKind = null; showDestinations = true; destinationError = null; choosingSchedule = true }
+    }
 
     fun cancelSchedule() {
         choosingSchedule = false
         pendingRequest?.let { respond(it, error = "cancelled") }
         pendingRequest = null
+        pendingMediaKind = null
+        destinationError = null
     }
 
     fun chooseSchedule(value: EditCalendarSchedule, token: String) {
-        if (synchronizeSession(token) || !value.isFuture()) return
+        if (synchronizeSession(token) || !value.isFuture() || value.destination !in setOf("reel", "feed", "story", "both")) return
         schedule = value
+        destinationError = null
         choosingSchedule = false
-        pendingRequest?.let { requestId -> pendingRequest = null; request(requestId, token) }
+        pendingRequest?.let { requestId ->
+            val kind = pendingMediaKind
+            pendingRequest = null; pendingMediaKind = null
+            request(requestId, token, kind)
+        }
     }
 
-    fun request(requestId: String, token: String) {
-        if (!EditCalendarPolicy.validRequestId(requestId)) return
+    fun request(requestId: String, token: String, requestedMediaKind: String? = null) {
+        if (!EditCalendarPolicy.validRequestId(requestId) ||
+            (requestedMediaKind != null && requestedMediaKind !in setOf("image", "video"))) return
         if (synchronizeSession(token)) return
         if (token.isBlank()) { respond(requestId, error = "auth_required"); return }
         if (job?.isActive == true) return
-        val value = requestSchedules[requestId] ?: schedule
+        val value = requestSchedules[requestId] ?: schedule?.let {
+            // A v1 document keeps its historical Feed/Reels intent. Typed pages
+            // opt in to the new placement choice; retries use the frozen value.
+            it.copy(destination = if (requestedMediaKind == null) "reel" else
+                it.destination.takeIf { chosen -> chosen in setOf("feed", "story", "both") } ?: "both")
+        }
         if (requestSchedules.containsKey(requestId) && value?.isFuture() != true) {
             // An uncertain retry retains its original intent instead of
             // silently scheduling the same order for a different time.
@@ -84,6 +110,9 @@ internal class EditCalendarViewModel(
         }
         if (value == null || !value.isFuture()) {
             pendingRequest = requestId
+            pendingMediaKind = requestedMediaKind
+            mediaKind = requestedMediaKind
+            showDestinations = requestedMediaKind != null
             choosingSchedule = true
             return
         }
@@ -103,7 +132,20 @@ internal class EditCalendarViewModel(
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: EditCalendarException) {
-                if (nonce == requestNonce && accountKey == requestAccount) respond(requestId, error = error.code)
+                if (nonce == requestNonce && accountKey == requestAccount) {
+                    if (error.code == "edit_calendar_story_business_required") {
+                        // This explicit rejection occurs before any context or quota
+                        // is created. Reopen the same intent for a user correction.
+                        requestSchedules.remove(requestId)
+                        schedule = value
+                        pendingRequest = requestId
+                        pendingMediaKind = requestedMediaKind
+                        mediaKind = requestedMediaKind
+                        showDestinations = true
+                        destinationError = "Story exige uma conta Instagram Empresa. Desmarque Story para continuar."
+                        choosingSchedule = true
+                    } else respond(requestId, error = error.code)
+                }
             } finally {
                 if (nonce == requestNonce && accountKey == requestAccount) busy = false
             }

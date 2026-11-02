@@ -23,9 +23,10 @@ internal class EditCalendarClient(
 ) {
     suspend fun create(token: String, requestId: String, schedule: EditCalendarSchedule): EditCalendarTicket = withContext(Dispatchers.IO) {
         if (token.isBlank()) throw EditCalendarException("auth_required")
-        if (!EditCalendarPolicy.validRequestId(requestId) || !schedule.isFuture()) throw EditCalendarException("invalid_schedule")
+        if (!EditCalendarPolicy.validRequestId(requestId) || !schedule.isFuture() ||
+            schedule.destination !in setOf("reel", "feed", "story", "both")) throw EditCalendarException("invalid_schedule")
         val body = JSONObject().put("requestId", requestId).put("date", schedule.date)
-            .put("time", schedule.time).put("destination", "reel")
+            .put("time", schedule.time).put("destination", schedule.destination)
         val request = Request.Builder().url(baseUrl.trimEnd('/') + "/empresa/edit/context")
             .header("Authorization", "Bearer $token").header("Cache-Control", "no-store")
             .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
@@ -33,7 +34,16 @@ internal class EditCalendarClient(
             client.newCall(request).execute().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (response.code == 401) throw EditCalendarException("auth_required")
-                if (!response.isSuccessful || text.length > 8192) throw EditCalendarException("calendar_unavailable")
+                if (text.length > 8192) throw EditCalendarException("calendar_unavailable")
+                if (!response.isSuccessful) {
+                    val failure = runCatching { JSONObject(text) }.getOrNull()
+                    val code = failure?.optString("code").orEmpty()
+                    val error = failure?.optString("error").orEmpty()
+                    if (listOf(code, error).any { it in setOf("edit_calendar_story_business_required", "calendar_story_business_required") }) {
+                        throw EditCalendarException("edit_calendar_story_business_required")
+                    }
+                    throw EditCalendarException("calendar_unavailable")
+                }
                 val result = JSONObject(text)
                 val ticket = result.optString("ticket")
                 val expiry = result.optString("expiresAt")

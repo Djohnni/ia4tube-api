@@ -30,6 +30,20 @@ class EditCalendarPolicyTest {
         assertNull(EditCalendarPolicy.requestId(callback, page, false, nonce))
     }
 
+    @Test fun typedRequestAcceptsOnlyAnExactImageOrVideoHintAndRetainsLegacy() {
+        assertEquals(EditCalendarRequest(request), EditCalendarPolicy.request(callback, page, true, nonce))
+        for (kind in listOf("image", "video")) {
+            val typed = "$callback&mediaKind=$kind"
+            assertEquals(EditCalendarRequest(request, kind), EditCalendarPolicy.request(typed, page, true, nonce))
+            assertNull(EditCalendarPolicy.request(typed, page, false, nonce))
+            assertNull(EditCalendarPolicy.request(typed.replace(nonce, "B".repeat(43)), page, true, nonce))
+        }
+        for (suffix in listOf("&mediaKind=", "&mediaKind=Image", "&mediaKind=audio", "&mediaKind=image&mediaKind=video",
+            "&mediaKind=%69mage", "&mediaKind=video&extra=1")) {
+            assertNull(suffix, EditCalendarPolicy.request(callback + suffix, page, true, nonce))
+        }
+    }
+
     @Test fun scheduleUsesBrasiliaAndRejectsPastDatesAndMalformedInput() {
         val now = Instant.parse("2026-10-28T19:00:00Z") // 16:00 Brasília.
         assertTrue(EditCalendarSchedule("2026-10-28", "16:01").isFuture(now))

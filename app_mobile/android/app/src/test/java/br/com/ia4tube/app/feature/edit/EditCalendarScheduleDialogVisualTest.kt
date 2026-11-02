@@ -63,7 +63,33 @@ class EditCalendarScheduleDialogVisualTest {
                 ui.assertConfirmationVisible()
                 ui.capture(if (day == 1) "posting97-day01-360.png" else "posting97-day02-large-text.png")
                 ui.click("Confirmar")
-                assertEquals(listOf(EditCalendarSchedule(date.toString(), if (day == 1) "18:00" else "17:53")), ui.confirmed)
+                assertEquals(listOf(EditCalendarSchedule(date.toString(), if (day == 1) "18:00" else "17:53", "both")), ui.confirmed)
+            }
+        }
+    }
+
+    @Test fun imageAndVideoDefaultToBothAndUserMayDisableOnlyOnePlacement() {
+        val date = LocalDate.now(ZoneId.of("America/Sao_Paulo")).plusDays(1)
+        for ((kind, mainLabel) in listOf("image" to "Feed", "video" to "Reels")) {
+            Harness(date, mediaKind = kind).use { ui ->
+                ui.assertPlacement(mainLabel, true, false)
+                ui.assertPlacement("Story", true, false)
+                ui.capture("placements99-$kind-both.png")
+                ui.clickPlacement("Story")
+                ui.assertPlacement(mainLabel, true, true)
+                ui.assertPlacement("Story", false, false)
+                ui.assertTextFits()
+                ui.assertConfirmationVisible()
+                ui.capture("placements99-$kind-feed-only.png")
+                ui.click("Confirmar")
+                assertEquals("feed", ui.confirmed.single().destination)
+            }
+            Harness(date, mediaKind = kind).use { ui ->
+                ui.clickPlacement(mainLabel)
+                ui.assertPlacement(mainLabel, false, false)
+                ui.assertPlacement("Story", true, true)
+                ui.click("Confirmar")
+                assertEquals("story", ui.confirmed.single().destination)
             }
         }
     }
@@ -83,7 +109,7 @@ class EditCalendarScheduleDialogVisualTest {
         }
     }
 
-    private class Harness(date: LocalDate, fontScale: Float = 1f) : AutoCloseable {
+    private class Harness(date: LocalDate, fontScale: Float = 1f, mediaKind: String? = null) : AutoCloseable {
         val confirmed = mutableListOf<EditCalendarSchedule>()
         var dismissed = 0
         private val width = 720
@@ -106,7 +132,7 @@ class EditCalendarScheduleDialogVisualTest {
                         CompositionLocalProvider(LocalDensity provides Density(2f, fontScale)) {
                             EditCalendarScheduleDialog(
                                 initial = EditCalendarSchedule(date.toString(), "18:00"),
-                                suggestionCategory = editPostingTimeCategory("Pizzaria"),
+                                suggestionCategory = editPostingTimeCategory("Pizzaria"), mediaKind = mediaKind,
                                 onDismiss = { dismissed++ }, onConfirm = { confirmed += it })
                         }
                     }
@@ -161,6 +187,21 @@ class EditCalendarScheduleDialogVisualTest {
         fun click(value: String) {
             val node = button(value)
             assertNull("$value must be enabled before a test click", node.config.getOrNull(SemanticsProperties.Disabled))
+            assertTrue(requireNotNull(node.config[SemanticsActions.OnClick].action).invoke())
+            settle()
+        }
+        private fun placement(label: String): SemanticsNode = nodes().first { node ->
+            node.config.getOrNull(SemanticsProperties.ToggleableState) != null && label(node) == label
+        }
+        fun assertPlacement(label: String, checked: Boolean, disabled: Boolean) {
+            val node = placement(label)
+            assertEquals(if (checked) androidx.compose.ui.state.ToggleableState.On else androidx.compose.ui.state.ToggleableState.Off,
+                node.config.getOrNull(SemanticsProperties.ToggleableState))
+            assertEquals(disabled, node.config.getOrNull(SemanticsProperties.Disabled) != null)
+        }
+        fun clickPlacement(label: String) {
+            val node = placement(label)
+            assertNull(node.config.getOrNull(SemanticsProperties.Disabled))
             assertTrue(requireNotNull(node.config[SemanticsActions.OnClick].action).invoke())
             settle()
         }

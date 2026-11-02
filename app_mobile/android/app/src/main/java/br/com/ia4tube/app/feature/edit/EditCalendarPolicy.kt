@@ -7,7 +7,9 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.util.Locale
 
-internal data class EditCalendarSchedule(val date: String, val time: String) {
+internal data class EditCalendarRequest(val requestId: String, val mediaKind: String? = null)
+
+internal data class EditCalendarSchedule(val date: String, val time: String, val destination: String = "reel") {
     fun isFuture(now: Instant = Instant.now()): Boolean = runCatching {
         LocalDate.parse(date).atTime(LocalTime.parse(time)).atZone(ZoneId.of("America/Sao_Paulo"))
             .toInstant().isAfter(now) && date.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) &&
@@ -30,17 +32,24 @@ internal object EditCalendarPolicy {
     fun isCallback(value: String?): Boolean =
         EditNavigationPolicy.isWebsite(value) && uri(value)?.rawPath == CALLBACK_PATH
 
-    fun requestId(target: String?, current: String?, mainFrame: Boolean, expectedNonce: String): String? {
+    fun requestId(target: String?, current: String?, mainFrame: Boolean, expectedNonce: String): String? =
+        request(target, current, mainFrame, expectedNonce)?.requestId
+
+    fun request(target: String?, current: String?, mainFrame: Boolean, expectedNonce: String): EditCalendarRequest? {
         if (!mainFrame || !isDocument(current) || !isCallback(target) || !nonce.matches(expectedNonce)) return null
         val request = uri(target) ?: return null
         val document = uri(current) ?: return null
         if (request.host.lowercase(Locale.ROOT) != document.host.lowercase(Locale.ROOT) || request.rawFragment != null) return null
         val parts = request.rawQuery?.split('&') ?: return null
-        if (parts.size != 2) return null
+        if (parts.size !in 2..3) return null
         val parameters = parts.map { it.split('=', limit = 2) }
-        if (parameters.any { it.size != 2 } || parameters.map { it[0] }.toSet() != setOf("requestId", "nonce")) return null
+        val keys = if (parts.size == 3) setOf("requestId", "nonce", "mediaKind") else setOf("requestId", "nonce")
+        if (parameters.any { it.size != 2 } || parameters.map { it[0] }.toSet() != keys) return null
         val fields = parameters.associate { it[0] to it[1] }
-        return fields["requestId"]?.takeIf { uuid.matches(it) && fields["nonce"] == expectedNonce }
+        val requestId = fields["requestId"]?.takeIf { uuid.matches(it) && fields["nonce"] == expectedNonce } ?: return null
+        val kind = fields["mediaKind"]
+        if (parts.size == 3 && kind !in setOf("image", "video")) return null
+        return EditCalendarRequest(requestId, kind)
     }
 
     fun validTicket(value: String): Boolean = ticket.matches(value)

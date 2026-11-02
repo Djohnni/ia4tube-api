@@ -77,7 +77,7 @@ class EditCalendarOrderScheduleTest {
         assertEquals(id, body.getString("requestId"))
         assertEquals(selected.date, body.getString("date"))
         assertEquals(selected.time, body.getString("time"))
-        assertEquals("reel", body.getString("destination"))
+        assertEquals(selected.destination, body.getString("destination"))
     }
 
     private fun completeFirst(selected: EditCalendarSchedule = schedule(1, "18:00")): EditCalendarReply {
@@ -185,6 +185,66 @@ class EditCalendarOrderScheduleTest {
         state.request(firstId, "synthetic-other-session")
         assertTrue("Even a formerly frozen UUID cannot reuse the prior account's time", state.choosingSchedule)
         assertEquals(1, server.requestCount)
+    }
+
+    @Test fun typedRetryRetainsBothPlacementsAndNewOrderRequiresANewChoice() = runTest(dispatcher) {
+        val first = schedule(1, "18:00").copy(destination = "both")
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        state.request(firstId, token, "image")
+        assertEquals("image", state.mediaKind)
+        assertTrue(state.showDestinations)
+        state.chooseSchedule(first, token)
+        assertEquals("calendar_unavailable", awaitReply(firstId).error)
+        assertSchedule(nextRequest(), firstId, first)
+        state.delivered(requireNotNull(state.reply))
+        server.enqueue(success(firstId))
+        state.request(firstId, token, "video")
+        assertNotNull(awaitReply(firstId).ticket)
+        assertSchedule(nextRequest(), firstId, first)
+        state.delivered(requireNotNull(state.reply))
+        state.request(secondId, token, "video")
+        assertTrue(state.choosingSchedule)
+        assertEquals("video", state.mediaKind)
+        assertNull(state.schedule)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test fun explicitStoryRejectionReopensSameIntentBeforeAnyRetryOrNewTicket() = runTest(dispatcher) {
+        val selected = schedule(1, "18:00").copy(destination = "both")
+        server.enqueue(MockResponse().setResponseCode(409).setBody(JSONObject()
+            .put("code", "edit_calendar_story_business_required").put("error", "Business required").toString()))
+        state.request(firstId, token, "image")
+        state.chooseSchedule(selected, token)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (state.busy && System.nanoTime() < deadline) {
+            dispatcher.scheduler.runCurrent()
+            if (state.busy) Thread.sleep(5)
+        }
+        dispatcher.scheduler.runCurrent()
+        assertFalse(state.busy)
+        assertTrue(state.choosingSchedule)
+        assertNotNull(state.destinationError)
+        assertEquals(selected, state.schedule)
+        assertNull("Web request stays pending for the corrected choice", state.reply)
+        assertSchedule(nextRequest(), firstId, selected)
+        assertEquals(1, server.requestCount)
+        server.enqueue(success(firstId))
+        val feedOnly = selected.copy(destination = "feed")
+        state.chooseSchedule(feedOnly, token)
+        assertNotNull(awaitReply(firstId).ticket)
+        assertSchedule(nextRequest(), firstId, feedOnly)
+        assertNull(state.destinationError)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test fun legacyPageNeverInheritsNewHeaderPlacementOrAdditionalFields() = runTest(dispatcher) {
+        state.openSchedule()
+        assertTrue(state.showDestinations)
+        state.chooseSchedule(schedule(1, "18:00").copy(destination = "both"), token)
+        server.enqueue(success(firstId))
+        state.request(firstId, token)
+        assertNotNull(awaitReply(firstId).ticket)
+        assertSchedule(nextRequest(), firstId, schedule(1, "18:00"))
     }
 
     @Test fun authenticationAndCancelledChoiceNeverInstantiateTheContextClient() = runTest(dispatcher) {

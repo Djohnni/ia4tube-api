@@ -39,6 +39,26 @@ class EditCalendarClientTest {
         } finally { server.shutdown() }
     }
 
+    @Test fun explicitPlacementsKeepTheSameAuthenticatedContextContract() = runBlocking {
+        val server = MockWebServer()
+        try {
+            val client = EditCalendarClient(server.url("/").toString())
+            for (destination in listOf("feed", "story", "both")) {
+                server.enqueue(MockResponse().setBody(JSONObject().put("ok", true).put("ticket", ticket)
+                    .put("expiresAt", Instant.now().plusSeconds(300).toString()).toString()))
+                client.create("local-test-token", requestId, schedule().copy(destination = destination))
+                val body = JSONObject(server.takeRequest().body.readUtf8())
+                assertEquals(setOf("requestId", "date", "time", "destination"), body.keys().asSequence().toSet())
+                assertEquals(destination, body.getString("destination"))
+            }
+            server.enqueue(MockResponse().setResponseCode(409).setBody(JSONObject()
+                .put("code", "edit_calendar_story_business_required").put("error", "Story requires Business").toString()))
+            try { client.create("local-test-token", requestId, schedule().copy(destination = "both")); fail("Story rejection lost") }
+            catch (error: EditCalendarException) { assertEquals("edit_calendar_story_business_required", error.code) }
+            assertEquals(4, server.requestCount)
+        } finally { server.shutdown() }
+    }
+
     @Test fun malformedOrExpiredCapabilitiesNeverReachTheWebPage() = runBlocking {
         val server = MockWebServer()
         try {
