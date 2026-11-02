@@ -56,6 +56,7 @@ function createReadyImageService(ports) {
     row = inspect(ticket);
     if (row.expiresAt <= clock()) fail("context_expired");
     return { ok: true, requestId: row.id, date: row.request.date, time: row.request.time,
+      destination: row.request.destination === "reel" ? "feed" : row.request.destination,
       remainingImages: Number.isSafeInteger(remaining) && remaining >= 0 ? remaining : null };
   }
   function canEdit(ticket) {

@@ -23,11 +23,11 @@ function text(value, max = 200) {
 }
 function contextInput(value, now) {
   exact(value, ["requestId", "date", "time", "destination", "caption"]);
-  if (!UUID.test(value.requestId || "") || value.destination !== "reel") fail("input_invalid", 400);
+  if (!UUID.test(value.requestId || "") || !["reel", "feed", "story", "both"].includes(value.destination)) fail("input_invalid", 400);
   const at = dateTime(value.date, value.time);
   if (at <= now || at > now + 179 * 86400000) fail("time_invalid", 400);
   return { requestId: value.requestId.toLowerCase(), date: value.date, time: value.time,
-    destination: "reel", caption: calendarCaption(value.caption ?? "") };
+    destination: value.destination, caption: calendarCaption(value.caption ?? "") };
 }
 function bindInput(value) {
   exact(value, ["ticket", "editOrderId", "title", "caption", "durationSeconds", "inputHash", "mediaKind"]);
@@ -111,7 +111,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     contextFile, read, write: atomicWriteJson, ticketContext, ownerClient, acquireAllocationLock: acquireLock,
     admit: admission.admit, remainingImages: admission.remainingImages, bind, orderRoot, clock, fault });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
-    const current = ownerClient(claims), request = contextInput(input, clock()); directories();
+    const current = ownerClient(claims), request = contextInput(input, clock());
     const id = request.requestId, digest = hash(JSON.stringify(request));
     const prior = read(contextFile(id));
     if (prior) {
@@ -119,6 +119,17 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       if (prior.requestHash !== digest || prior.phase !== "pending" || prior.expiresAt <= clock()) fail("context_conflict");
       return contextResponse(prior);
     }
+    if (["story", "both"].includes(request.destination)) {
+      // Read the existing connection only. A new Story intent must be supported
+      // before any context or credit is committed; an issued intent stays frozen.
+      if (typeof observeConnection !== "function") fail("admission_unavailable", 503);
+      let connection;
+      try { connection = await observeConnection(claims); }
+      catch { fail("admission_unavailable", 503); }
+      ownerClient(claims); contextInput(input, clock());
+      if (connection?.accountType !== "business") fail("story_business_required", 409);
+    }
+    directories();
     const planningId = `pm_edit_${id.replace(/-/g, "")}`;
     const factory = await prepareCalendarRequest(claims);
     const envelope = factory?.({ planningId, quantity: 1 }) || null;
@@ -224,7 +235,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
         if (billingDigest(current.client) !== row.beforeBillingDigest) fail("allocation_reconciliation_required", 503);
         try {
           plan = planning.createRequest({ baseDir: planningRoot, cliente: current.client, whatsapp: row.owner,
-            body: { quantidade_reservada: 1, instagram_destination: "feed", orientacoes_fotos: [
+            body: { quantidade_reservada: 1, instagram_destination: row.request.destination === "reel" ? "feed" : row.request.destination, orientacoes_fotos: [
               { slot_id: image ? "edit-image" : "edit-video", ordem: 1, tem_arquivo: false, objetivo: objective } ] },
             files: {}, freeArtBlocked: row.freeArtBlocked || currentFreeArtBlocked(row.ipIdentity) === true, externalEdit,
             calendarAuthorizationFactory: () => row.envelope });

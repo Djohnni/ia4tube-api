@@ -175,7 +175,7 @@ function createEditAdmissionService(ports) {
         current.client.arte_gratis_disponivel = true;
       }
       plan = planning.createRequest({ baseDir: planningRoot, cliente: current.client, whatsapp: row.owner,
-        body: { quantidade_reservada: 1, instagram_destination: "feed", orientacoes_fotos: [{
+        body: { quantidade_reservada: 1, instagram_destination: row.request.destination === "reel" ? "feed" : row.request.destination, orientacoes_fotos: [{
           slot_id: value.mediaKind === "image" ? "edit-image" : "edit-video", ordem: 1, tem_arquivo: false,
           objetivo: value.mediaKind === "image" ? "Imagem escolhida no Edit" : "Vídeo escolhido no Edit" }] }, files: {},
         // The admission marker deliberately has no producer inputHash and cannot create children.

@@ -58,7 +58,7 @@ async function assertNoWrites(action) {
 test("context read returns native date/time and paid plus standalone count without any writes or preparation", async t => {
   const f = await fixture(t), before = f.readClients(), contextBefore = fs.readFileSync(f.contextPath);
   const result = await assertNoWrites(() => f.service.readReadyImageContext(f.ticket));
-  assert.deepEqual(result, { ok: true, requestId: f.input.requestId, date: f.input.date, time: "16:43", remainingImages: 12 });
+  assert.deepEqual(result, { ok: true, requestId: f.input.requestId, date: f.input.date, time: "16:43", destination: "feed", remainingImages: 12 });
   assert.deepEqual(f.readClients(), before); assert.deepEqual(fs.readFileSync(f.contextPath), contextBefore);
   assert.equal(f.observations(), 0); assert.equal(f.prepares(), 1);
   assert.equal(fs.existsSync(path.join(f.root, "private/edit-calendar/free-image-ledger.json")), false);
@@ -158,7 +158,7 @@ test("HTTP read needs the ticket header, does not accept URL credentials or date
   assert.equal((await fetch(url + "?date=2099-01-01", { headers })).status, 400);
   const result = await fetch(url, { headers }); assert.equal(result.status, 200);
   assert.equal(result.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await result.json(), { ok: true, requestId: f.input.requestId, date: f.input.date, time: f.input.time, remainingImages: 12 });
+  assert.deepEqual(await result.json(), { ok: true, requestId: f.input.requestId, date: f.input.date, time: f.input.time, destination: "feed", remainingImages: 12 });
   assert.equal(uploads, 0);
   const before = f.readClients(), availability = await f.service.availability({ whatsapp: f.owner });
   assert.deepEqual(Object.keys(availability.availability).sort(), ["canImage", "canVideo", "observedAt", "schemaVersion", "validUntil"]);

@@ -15,6 +15,7 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
       res.status(status).json({ ok: false, code, error: error.code === "billing_required" ? "Você não tem saldo suficiente para continuar."
         : code === "edit_calendar_ready_image_caption_required" ? "Escreva a legenda desta imagem."
         : code === "edit_calendar_ready_image_invalid" ? "Confira a imagem e tente novamente."
+        : code === "edit_calendar_story_business_required" ? "Story exige uma conta Instagram Empresa. Desmarque Story para continuar."
         : "Não foi possível vincular este pedido ao calendário. Confira a conta e a programação.",
         ...(req.readyImageTicket && [400, 413, 415, 422].includes(status) &&
           service.readyImageCanEdit(req.readyImageTicket) === true ? { safeToEdit: true } : {}) });

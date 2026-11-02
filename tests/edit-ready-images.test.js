@@ -46,9 +46,9 @@ function fixture(t, options = {}) {
   const service = createEditCalendarService(dependencies); t.after(() => service.close());
   const claims = who => ({ whatsapp: who, sub: who, company_id: who, token_version: 2,
     iss: "ia4tube-api", aud: "ia4tube-client", jti: crypto.randomUUID() });
-  async function context(who = owner) {
+  async function context(who = owner, destination = "reel") {
     const input = { requestId: crypto.randomUUID(), date: new Date(now + 2 * 86400000).toISOString().slice(0, 10),
-      time: "14:37", destination: "reel", caption: "Texto nativo anterior" };
+      time: "14:37", destination, caption: "Texto nativo anterior" };
     const result = await service.createContext(claims(who), input);
     return { body: { requestId: input.requestId, ticket: result.ticket, caption: "Minha legenda, sem IA." }, input };
   }
@@ -105,6 +105,18 @@ test("finished photo uses one image quota and the unchanged image calendar sourc
   assert.deepEqual([prepared.variants.feed.width, prepared.variants.feed.height], [1080, 1350]);
   assert.deepEqual([prepared.variants.story.width, prepared.variants.story.height], [1080, 1920]);
   assert.equal(f.current().artes_mensais_restantes, 9);
+});
+
+test("a finished photo selected for Feed and Story uses one image quota and keeps both targets after finalization", async t => {
+  const f = fixture(t), selected = await f.context(f.owner, "both"), file = await f.photo();
+  const receipt = await f.service.submitReadyImage(selected.body, file);
+  assert.deepEqual(await f.service.submitReadyImage(selected.body, file), receipt);
+  assert.equal(f.current().artes_mensais_restantes, 9); assert.equal(f.current().videos_mensais_restantes, 4);
+  const items = f.source.list(f.owner); assert.equal(items.length, 1);
+  assert.equal(items[0].destination, "both"); assert.equal(items[0].imageReady, true);
+  assert.equal(items[0].date, selected.input.date); assert.equal(items[0].time, selected.input.time);
+  const state = model.freshState(); model.syncSources(state, items, f.companyId, Date.now());
+  assert.deepEqual(require("../src/social/calendar/destinations").targets(Object.values(state.jobs)[0]), ["feed", "story"]);
 });
 
 test("same request and content retries return the same receipt; changed photo/caption cannot replace it", async t => {
