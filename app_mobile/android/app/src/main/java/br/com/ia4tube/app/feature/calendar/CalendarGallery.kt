@@ -428,7 +428,7 @@ private fun CalendarDeliveryDialog(art: ScheduledArt, action: String, token: Str
                         enabled = !busy && (target == "feed" || storyEligible))
                     Text(destinationLabel(target) + if (target == "both") " — 2 envios" else "")
                 }
-                if (!storyEligible) Text("A publicação de Story requer uma conta Business elegível.")
+                if (!storyEligible) Text("Para publicar Story, conecte uma conta Empresa ou Criador.")
                 if (selected == "both") Row { for (target in listOf("feed", "story")) TextButton(colors = calendarTextButtonColors(), onClick = { preview = target }) { Text("Ver ${destinationLabel(target)}") } }
                 if (art.generatedVideo != null) {
                     Text("O vídeo pronto será usado como Reel no Feed e como vídeo no Story. A legenda acompanha o Reel.")

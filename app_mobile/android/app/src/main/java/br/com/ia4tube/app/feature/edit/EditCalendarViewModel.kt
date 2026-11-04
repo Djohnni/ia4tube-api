@@ -142,7 +142,7 @@ internal class EditCalendarViewModel(
                         pendingMediaKind = requestedMediaKind
                         mediaKind = requestedMediaKind
                         showDestinations = true
-                        destinationError = "Story exige uma conta Instagram Empresa. Desmarque Story para continuar."
+                        destinationError = "Story exige uma conta Instagram profissional (Empresa ou Criador)."
                         choosingSchedule = true
                     } else respond(requestId, error = error.code)
                 }

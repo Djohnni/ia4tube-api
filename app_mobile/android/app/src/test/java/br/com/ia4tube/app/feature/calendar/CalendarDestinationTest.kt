@@ -36,6 +36,15 @@ class CalendarDestinationTest {
         assertEquals(2, art.previews.size); assertEquals("published", art.publications["feed"])
         assertEquals("Legenda do Feed", art.caption)
     }
+    @Test fun storyChoiceSupportsBothProfessionalTypesWithoutOpeningOperationGates() {
+        for (type in listOf("business", "creator", "personal", "unknown")) {
+            val body = payload()
+            body.getJSONObject("connection").put("accountType", type)
+            val snapshot = parseCalendar(body)
+            assertEquals(type in setOf("business", "creator"), snapshot.storyEligible)
+            assertFalse(snapshot.operationsAllowed)
+        }
+    }
     @Test fun foreignPreviewAndUnknownDestinationAreRejected() {
         for (bad in listOf("https://foreign.invalid/image", "/v1/social/calendar/items/${"b".repeat(40)}/image?destination=feed", "$path?destination=story")) {
             val body = payload(); body.getJSONArray("items").getJSONObject(0).getJSONObject("previews").put("feed", bad)

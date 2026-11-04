@@ -143,7 +143,7 @@ internal fun parseCalendar(root: JSONObject): CalendarSnapshot {
     val nextId = root.optJSONObject("next")?.getString("id")
     return CalendarSnapshot(true, preferences.getBoolean("enabled"), preferences.getLong("revision"),
         connection != null, connection?.optString("username"), root.getBoolean("operationsAllowed"), items, items.find { it.id == nextId },
-        connection?.optString("accountType") == "business", identity,
+        connection?.optString("accountType") in setOf("business", "creator"), identity,
         parseCalendarBinding(preferences.optJSONObject("binding")), parseCalendarBinding(connection?.optJSONObject("binding")))
 }
 
