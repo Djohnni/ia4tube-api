@@ -366,7 +366,7 @@ test("JPEG conversion preserves composition, private owner path and signed expir
   now += 901000; assert.throws(() => media.publicBytes(...new URL(media.descriptor(company, job).publicUrl).pathname.split("/").slice(-4).map((v,i) => i === 2 ? String(Number(v) - 901) : v)));
 });
 
-function formattedFixture(target = "both", authorized = true) {
+function formattedFixture(target = "both", authorized = true, accountType = "business") {
   const f = fixture();
   f.setSources([{ key: "plan:1", planningId: "plan-synthetic", orderId: "order1", date: "2026-09-10", time: "12:05",
     caption: "Legenda original", imageReady: true, version: "1", layout: "safe_master_v1", destination: target,
@@ -375,13 +375,13 @@ function formattedFixture(target = "both", authorized = true) {
   const story = { ...feed, sha: "c".repeat(64), height: 1920 };
   f.media.prepare = async () => ({ ...(target === "story" ? story : feed), variants: { feed, story } });
   const oldConnection = f.publisher.connection;
-  f.publisher.connection = async ctx => { const found = await oldConnection(ctx); return found ? { ...found, accountType: "business" } : null; };
+  f.publisher.connection = async ctx => { const found = await oldConnection(ctx); return found ? { ...found, accountType } : null; };
   const sent = []; let outcome = target => ({ published: true, mediaId: target === "feed" ? "12345" : "23456", permalink: null });
   f.publisher.send = async (_ctx, item) => { sent.push(item.target); return outcome(item.target); };
   return { ...f, sent, setOutcome: fn => outcome = fn, due: () => f.setTime(model.dateTime("2026-09-10", "12:05")) };
 }
-test("two placements share one calendar item and use one durable send per placement", async () => {
-  const f = formattedFixture(); const item = await f.first(); assert.equal(item.destination, "both"); assert.equal(item.formatsReady, true);
+for (const accountType of ["business", "creator"]) test(`${accountType}: two placements share one calendar item and use one durable send per placement`, async () => {
+  const f = formattedFixture("both", true, accountType); const item = await f.first(); assert.equal(item.destination, "both"); assert.equal(item.formatsReady, true);
   f.due(); await Promise.all([f.service.tick(), f.service.tick()]);
   assert.deepEqual(f.sent, ["feed"]); assert.equal((await f.first()).status, "confirming");
   await f.service.tick(); await f.service.tick();
@@ -390,15 +390,15 @@ test("two placements share one calendar item and use one durable send per placem
   assert.equal(done.publications.feed.result.mediaId, "12345"); assert.equal(done.publications.story.result.mediaId, "23456");
   await assert.rejects(f.service.edit(f.claims, done.id, { action: "destination", destination: "feed", confirmed: true, revision: done.revision }), { code: "calendar_dispatch_started" });
 });
-test("a failed second destination remains partial and never repeats the successful first one", async () => {
-  const f = formattedFixture(); await f.first(); f.due();
+for (const accountType of ["business", "creator"]) test(`${accountType}: a failed second destination remains partial and never repeats the successful first one`, async () => {
+  const f = formattedFixture("both", true, accountType); await f.first(); f.due();
   f.setOutcome(target => target === "feed" ? { published: true, mediaId: "12345" } : { published: false, state: "failed_permanent" });
   await f.service.tick(); await f.service.tick(); await f.service.tick();
   assert.deepEqual(f.sent, ["feed", "story"]); const item = await f.first();
   assert.equal(item.status, "partial"); assert.equal(item.publications.feed.status, "published"); assert.equal(item.publications.story.status, "failed");
 });
-test("uncertain first destination is observed, never re-sent or bypassed with a second delivery", async () => {
-  const f = formattedFixture(); f.setOutcome(() => null); f.setResponse(null); await f.first(); f.due();
+for (const accountType of ["business", "creator"]) test(`${accountType}: uncertain first destination is observed, never re-sent or bypassed with a second delivery`, async () => {
+  const f = formattedFixture("both", true, accountType); f.setOutcome(() => null); f.setResponse(null); await f.first(); f.due();
   await f.service.tick(); await f.service.tick(); await f.service.tick();
   assert.deepEqual(f.sent, ["feed"]); assert.equal((await f.first()).status, "confirming");
 });
@@ -435,6 +435,17 @@ test("destination edit is revision-bound, preview-confirmed and does not create 
   f.due(); await f.service.tick(); assert.deepEqual(f.sent, ["story"]);
 });
 
+test("creator can select both destinations and renew consent without duplicating a calendar item", async () => {
+  const f = formattedFixture("feed", false, "creator"), item = await f.first();
+  const changed = await f.service.edit(f.claims, item.id, { action: "destination", destination: "both", confirmed: true, revision: item.revision });
+  const current = changed.items[0];
+  const enabled = await f.service.edit(f.claims, item.id, { action: "automatic", enabled: true, confirmed: true, revision: current.revision });
+  assert.equal(enabled.items[0].destination, "both"); assert.equal(enabled.items[0].automatic, true);
+  f.due(); await f.service.tick(); await f.service.tick(); await f.service.tick();
+  assert.deepEqual(f.sent, ["feed", "story"]);
+  assert.equal(Object.keys(f.store.rows.get(f.ids.companyId).jobs).length, 1);
+});
+
 test("renewing one art does not release its original order allocation for another source", async () => {
   const f = formattedFixture("feed"); const item = await f.first();
   const originalNonce = f.store.rows.get(f.ids.companyId).jobs[item.id].grantNonce;
@@ -448,13 +459,13 @@ test("renewing one art does not release its original order allocation for anothe
   f.due(); await f.service.tick(); assert.deepEqual(f.sent, []);
 });
 test("gates, foreign binding, missing connection and overdue time block both destinations", async () => {
-  for (const reason of ["gates", "binding", "connection", "overdue", "creator"]) {
+  for (const reason of ["gates", "binding", "connection", "overdue", "personal", "unknown"]) {
     const f = formattedFixture(); await f.first(); f.due();
     if (reason === "gates") f.setOpen(false);
     if (reason === "binding") f.setBinding({ ...f.binding, externalId: "999999999999" });
     if (reason === "connection") f.setBinding(null);
     if (reason === "overdue") f.setTime(model.dateTime("2026-09-10", "12:16"));
-    if (reason === "creator") f.publisher.connection = async () => ({ binding: f.binding, accountType: "creator" });
+    if (["personal", "unknown"].includes(reason)) f.publisher.connection = async () => ({ binding: f.binding, accountType: reason });
     await f.service.tick(); assert.deepEqual(f.sent, [], reason);
   }
 });

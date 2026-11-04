@@ -86,7 +86,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
     const generatedVideo = job.mediaKind === "video" && job.asset?.mimeType === "video/mp4"
       ? { url: `/v1/social/calendar/items/${job.id}/video`, mimeType: "video/mp4",
         sizeBytes: job.asset.size, sha256: job.asset.sha, hasAudio: job.asset.hasAudio } : null;
-    if (status === "scheduled" && targets(job).includes("story") && connection?.accountType !== "business") status = "attention";
+    if (status === "scheduled" && targets(job).includes("story") && !["business", "creator"].includes(connection?.accountType)) status = "attention";
     if (status === "scheduled" && job.mediaKind === "video" && job.sourceKind !== "upload" &&
         (job.publicationQueueWaiting || Object.values(job.deliveries || {}).some(part => part.preDispatchWaiting))) status = "publication_queued";
     return { id: job.id, key: job.sourceKey, planningId: job.planningId, orderId: job.orderId,
@@ -275,7 +275,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         if (job.sourceKind === "upload") fail("calendar_import_not_operational", 503);
         if (!connection || !state.preferences.enabled || input.confirmed !== true) fail("calendar_connection_required");
         if (job.scheduledAt <= clock()) fail("calendar_time_outside_window", 400);
-        if (targets(job).includes("story") && connection.accountType !== "business") fail("calendar_story_business_required");
+        if (targets(job).includes("story") && !["business", "creator"].includes(connection.accountType)) fail("calendar_story_business_required");
         const envelope = grants.issue({ companyId: current.context.companyId, userId: current.context.userId,
           binding: connection.binding, revision: state.preferences.revision, planningId: job.planningId, quantity: 1, jobId: id });
         job.authorization = { ...grants.verify(envelope, current.context.companyId, current.context.userId), envelope };
@@ -283,7 +283,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
         // Otherwise a replacement source could reuse that order's one-art allowance.
         job.grantNonce = job.grantNonce || job.authorization.nonce;
       }
-      if (input.action === "destination" && ["story", "both"].includes(input.destination) && connection?.accountType !== "business") fail("calendar_story_business_required");
+      if (input.action === "destination" && ["story", "both"].includes(input.destination) && !["business", "creator"].includes(connection?.accountType)) fail("calendar_story_business_required");
       changeJob(state, id, input, clock());
       // The same owner transaction returns the updated snapshot only after
       // commit succeeds. Never retry the write if its outcome is uncertain.
@@ -540,7 +540,7 @@ function createCalendarService({ store, source, media, grants, auth, identity, r
       }
       const connection = await publisher.connection(ctx);
       if (!publisher.allowed(ctx) || !sameBinding(grant.binding, connection?.binding) || !part.asset || part.scheduledAt > clock() ||
-          (targets(snapshot).includes("story") && connection.accountType !== "business")) return false;
+          (targets(snapshot).includes("story") && !["business", "creator"].includes(connection.accountType))) return false;
       if (generatedVideo && publisher.publicationSlotAvailable && !await publisher.publicationSlotAvailable(ctx, part)) {
         const waiting = await store.update(ids.companyId, state => {
           const job = state.jobs[snapshot.id];

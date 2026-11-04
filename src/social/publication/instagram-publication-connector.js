@@ -749,7 +749,7 @@ function createInstagramPublicationConnector(options = {}) {
           }
         }
         if ((owned.destination || "feed") !== destination ||
-            (destination === "story" && (connection.account.accountType !== "business" ||
+            (destination === "story" && (!["business", "creator"].includes(connection.account.accountType) ||
               (owned.mimeType === "video/mp4" ? !isReadyVideoGeometry(owned.width, owned.height)
                 : owned.width !== 1080 || owned.height !== 1920)))) {
           connectorFail("resource_unavailable");

@@ -127,7 +127,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       try { connection = await observeConnection(claims); }
       catch { fail("admission_unavailable", 503); }
       ownerClient(claims); contextInput(input, clock());
-      if (connection?.accountType !== "business") fail("story_business_required", 409);
+      if (!["business", "creator"].includes(connection?.accountType)) fail("story_business_required", 409);
     }
     directories();
     const planningId = `pm_edit_${id.replace(/-/g, "")}`;

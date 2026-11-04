@@ -43,7 +43,7 @@ function createCalendarPublisher({ config, connectorStore, connectorAudit, crede
         ? { processingVideoMediaId: descriptor.mediaId } : {}),
       media: scopedMedia, transport, authorizeContext: candidate => candidate === context && allowed(candidate),
       authorizeConnection: connection => connection.account?.externalId === job.authorization.binding.externalId &&
-        (job.target === "story" ? connection.account?.accountType === "business" : ["business", "creator"].includes(connection.account?.accountType)),
+        ["business", "creator"].includes(connection.account?.accountType),
       authorizePublicationRequest: input => input.image.mediaId === descriptor.mediaId && input.caption === job.caption,
       authorizePublication: input => input.owned.metadataDigest === descriptor.metadataDigest && input.caption === job.caption,
       // Commercial captions are exact. Identical text is NOT evidence of identity.

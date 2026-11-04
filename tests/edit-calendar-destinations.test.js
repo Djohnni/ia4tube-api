@@ -56,9 +56,9 @@ test("legacy reel context keeps its exact serialized request and never adds a co
   assert.equal(f.observations(), 0); assert.deepEqual(f.readClients(), before);
 });
 
-for (const destination of ["feed", "story", "both"]) for (const mediaKind of ["image", "video"])
-  test(`${mediaKind} ${destination} intent reaches its one reservation and existing calendar source unchanged`, async t => {
-    const f = fixture(t), input = f.input(destination), before = f.readClients()[f.owner];
+for (const accountType of ["business", "creator"]) for (const destination of ["feed", "story", "both"]) for (const mediaKind of ["image", "video"])
+  test(`${accountType} ${mediaKind} ${destination} intent reaches its one reservation and existing calendar source unchanged`, async t => {
+    const f = fixture(t, { connection: { ...healthy, accountType } }), input = f.input(destination), before = f.readClients()[f.owner];
     const ctx = await f.service.createContext(f.claims, input), request = f.body(ctx.ticket, mediaKind);
     const admitted = await f.service.admit(request);
     assert.deepEqual(await f.service.admit(request), admitted);
@@ -83,7 +83,7 @@ for (const destination of ["feed", "story", "both", "reel"])
     assert.equal(f.source.list(f.owner)[0].destination, destination === "reel" ? "feed" : destination);
   });
 
-for (const connection of [null, { ...healthy, accountType: "creator" }])
+for (const connection of [null, { ...healthy, accountType: "personal" }, { ...healthy, accountType: "unknown" }])
   test(`unsupported Story intent is refused before a context, reservation or preparation; type=${connection?.accountType || "none"}`, async t => {
     const f = fixture(t, { connection }), before = f.readClients(), input = f.input("both");
     await assert.rejects(f.service.createContext(f.claims, input), { code: "edit_calendar_story_business_required", statusCode: 409 });
@@ -132,7 +132,7 @@ test("Story eligibility observation cannot bypass an account deactivated during 
 });
 
 test("context HTTP returns a usable Story explanation before quota is consumed", async t => {
-  const f = fixture(t, { connection: { ...healthy, accountType: "creator" } }), before = f.readClients();
+  const f = fixture(t, { connection: { ...healthy, accountType: "personal" } }), before = f.readClients();
   const app = express(); app.use(express.json()); app.use(createEditCalendarRouter({
     authenticate: (req, _res, next) => { req.user = f.claims; next(); }, botAuthenticate: (_req, res) => res.sendStatus(401),
     isBotAdmin: () => false, service: f.service }));
@@ -142,6 +142,6 @@ test("context HTTP returns a usable Story explanation before quota is consumed",
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(f.input("both")) });
   assert.equal(result.status, 409);
   const body = await result.json(); assert.equal(body.code, "edit_calendar_story_business_required");
-  assert.equal(body.error, "Story exige uma conta Instagram Empresa. Desmarque Story para continuar.");
+  assert.equal(body.error, "Story exige uma conta Instagram profissional (Empresa ou Criador).");
   assert.deepEqual(f.readClients(), before);
 });
