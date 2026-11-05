@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const TIME_ZONE = "America/Sao_Paulo";
 const MAX_ITEMS = 1000;
-const LATE_MS = 10 * 60 * 1000;
+const LATE_MS = 30 * 60 * 1000;
 const LOCKED = new Set(["dispatching", "confirming", "published", "failed", "partial"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function fail(code, status = 409) {

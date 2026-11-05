@@ -317,8 +317,24 @@ test("unknown outcome never repeats a POST, and edits are locked", async () => {
     { code: "calendar_dispatch_started" });
 });
 test("missed schedule does not burst publish after downtime", async () => {
-  const f = fixture(); await f.enable(); f.setTime(model.dateTime("2026-09-10", "12:11")); await f.service.tick();
+  const f = fixture(); await f.enable(); f.setTime(model.dateTime("2026-09-10", "12:31")); await f.service.tick();
   assert.equal(f.sends(), 0); assert.equal((await f.first()).status, "overdue");
+});
+
+for (const delay of [11 * 60000, 30 * 60000]) test(`a saved image ${delay / 60000} minutes late publishes once without changing its chosen time`, async () => {
+  const f = fixture(); await f.enable();
+  f.setTime(model.dateTime("2026-09-10", "12:00") + delay);
+  await f.service.tick(); await f.service.tick();
+  assert.equal(f.sends(), 1); const item = await f.first();
+  assert.equal(item.status, "published"); assert.equal(item.time, "12:00"); assert.equal(item.date, "2026-09-10");
+});
+
+test("an unstarted image just beyond thirty minutes stays saved and does not dispatch", async () => {
+  const f = fixture(); await f.enable(); const before = await f.first();
+  f.setTime(model.dateTime("2026-09-10", "12:30") + 1);
+  await f.service.tick(); assert.equal(f.sends(), 0);
+  const item = await f.first(); assert.equal(item.status, "overdue");
+  assert.equal(item.id, before.id); assert.equal(item.time, "12:00");
 });
 test("provider rejection is attention, not a forever publishing spinner; no automatic replacement", async () => {
   const f = fixture(); f.setResponse({ state: "failed_permanent", published: false }); await f.enable();
@@ -380,6 +396,24 @@ function formattedFixture(target = "both", authorized = true, accountType = "bus
   f.publisher.send = async (_ctx, item) => { sent.push(item.target); return outcome(item.target); };
   return { ...f, sent, setOutcome: fn => outcome = fn, due: () => f.setTime(model.dateTime("2026-09-10", "12:05")) };
 }
+for (const mediaKind of ["image", "video"]) test(`${mediaKind}: both placements can start at the thirty-minute boundary without duplicating either`, async () => {
+  const f = formattedFixture("both", true, "creator");
+  if (mediaKind === "video") {
+    const asset = { sha: "a".repeat(64), sourceHash: "b".repeat(64), mimeType: "video/mp4",
+      size: 100, width: 720, height: 1280, durationSeconds: 10, hasAudio: true, audioMode: "original" };
+    f.media.prepare = async () => ({ ...asset, variants: { reel: asset, story: asset } });
+    f.media.videoFile = () => ({ file: "synthetic", size: 100, sha: asset.sha });
+    f.setSources([{ key: "plan:1", planningId: "plan-synthetic", orderId: "order1", date: "2026-09-10", time: "12:05",
+      caption: "Vídeo pronto", imageReady: true, mediaKind, version: "video-late-1", destination: "both",
+      authorizationEnvelope: f.envelope }]);
+  }
+  await f.first(); f.setTime(model.dateTime("2026-09-10", "12:35") - 1);
+  await f.service.tick(); f.setTime(model.dateTime("2026-09-10", "12:35"));
+  await f.service.tick(); await f.service.tick();
+  assert.deepEqual(f.sent, [mediaKind === "video" ? "reel" : "feed", "story"]);
+  const item = await f.first(); assert.equal(item.status, "published"); assert.equal(item.time, "12:05");
+  assert.equal(Object.keys(f.store.rows.get(f.ids.companyId).jobs).length, 1);
+});
 for (const accountType of ["business", "creator"]) test(`${accountType}: two placements share one calendar item and use one durable send per placement`, async () => {
   const f = formattedFixture("both", true, accountType); const item = await f.first(); assert.equal(item.destination, "both"); assert.equal(item.formatsReady, true);
   f.due(); await Promise.all([f.service.tick(), f.service.tick()]);
@@ -464,7 +498,7 @@ test("gates, foreign binding, missing connection and overdue time block both des
     if (reason === "gates") f.setOpen(false);
     if (reason === "binding") f.setBinding({ ...f.binding, externalId: "999999999999" });
     if (reason === "connection") f.setBinding(null);
-    if (reason === "overdue") f.setTime(model.dateTime("2026-09-10", "12:16"));
+    if (reason === "overdue") f.setTime(model.dateTime("2026-09-10", "12:36"));
     if (["personal", "unknown"].includes(reason)) f.publisher.connection = async () => ({ binding: f.binding, accountType: reason });
     await f.service.tick(); assert.deepEqual(f.sent, [], reason);
   }
