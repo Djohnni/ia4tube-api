@@ -1,7 +1,7 @@
 "use strict";
 
 // iA4tube: a customer's finished photo joins the existing image-result path.
-// No generator, import workflow, publication adapter or client-selected owner.
+// Feed adaptation is confined to intake; publication and ownership stay unchanged.
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os"), crypto = require("node:crypto");
 const { hash, canonicalJson, admissionOrderId, UUID, fail } = require("./admission-contract");
 const { caption, dateTime } = require("../social/calendar/model");
@@ -11,7 +11,7 @@ const MAX_INPUT_BYTES = 10 * 1024 * 1024;
 const READY_IMAGE_MODEL_ID = "92edf67f-7c27-471c-b6f4-71b7ab4af228";
 const MIME = Object.freeze({ "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp" });
 
-async function normalizeReadyImage(file) {
+async function normalizeReadyImage(file, { prepareFeed = false } = {}) {
   if (!file || typeof file.path !== "string" || !Object.hasOwn(MIME, file.mimetype)) fail("ready_image_invalid", 422);
   const stat = fs.lstatSync(file.path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 1 || stat.size > MAX_INPUT_BYTES)
@@ -28,7 +28,19 @@ async function normalizeReadyImage(file) {
       .resize(1152, 1440, { fit: "contain", background: "#ffffff" })
       .toColourspace("srgb").png({ compressionLevel: 9 }).toBuffer();
     if (bytes.length < 1 || bytes.length > 32 * 1024 * 1024) fail("ready_image_invalid", 422);
-    return { bytes, sourceDigest: hash(original), normalizedDigest: hash(bytes) };
+    const result = { bytes, sourceDigest: hash(original), normalizedDigest: hash(bytes) };
+    if (prepareFeed) {
+      const rotated = [5, 6, 7, 8].includes(metadata.orientation);
+      const width = rotated ? metadata.height : metadata.width, height = rotated ? metadata.width : metadata.height;
+      result.needsAdaptation = width * 5 !== height * 4;
+      if (result.needsAdaptation) {
+        // Send the original composition, never the old white contain-frame.
+        result.feedSource = await sharp(original, { limitInputPixels: 25 * 1000 * 1000, failOn: "error" })
+          .rotate().flatten({ background: "#ffffff" }).toColourspace("srgb").png({ compressionLevel: 9 }).toBuffer();
+        if (result.feedSource.length > 32 * 1024 * 1024) fail("ready_image_invalid", 422);
+      }
+    }
+    return result;
   } catch (error) {
     if (error.code === "edit_calendar_ready_image_invalid") throw error;
     fail("ready_image_invalid", 422);
@@ -37,7 +49,7 @@ async function normalizeReadyImage(file) {
 
 function createReadyImageService(ports) {
   const { enabled, root, directories, contextFile, read, write, ticketContext, ownerClient,
-    acquireAllocationLock, admit, bind, orderRoot, clock, fault, remainingImages } = ports;
+    acquireAllocationLock, admit, bind, orderRoot, clock, fault, remainingImages, feedAdapter = null } = ports;
   const directory = path.join(root, "ready-images");
   function inspect(ticket) {
     if (!enabled) fail("admission_disabled", 503);
@@ -97,7 +109,8 @@ function createReadyImageService(ports) {
     if (!selectedCaption) fail("ready_image_caption_required", 422);
     if ((!initial.admission || initial.admission.billingRefused) &&
         dateTime(initial.request.date, initial.request.time) <= clock()) fail("time_invalid", 422);
-    const normalized = await normalizeReadyImage(file);
+    const normalized = await normalizeReadyImage(file, {
+      prepareFeed: Boolean(feedAdapter && (!initial.readyImage || initial.readyImage.feedAdaptation)) });
     // Authentication, account activity and scheduling are checked again after decoding.
     initial = inspect(input.ticket);
     const identity = { purpose: "edit_ready_image_v1", requestId: initial.id, sourceDigest: normalized.sourceDigest,
@@ -118,9 +131,12 @@ function createReadyImageService(ports) {
         if (!row.readyImage) {
           if (row.admission || row.binding || row.phase !== "pending") fail("order_conflict");
           if (dateTime(row.request.date, row.request.time) <= clock()) fail("time_invalid", 422);
+          const adaptFeed = feedAdapter && normalized.needsAdaptation;
+          if (adaptFeed) feedAdapter.assertConfigured();
           row.readyImage = { schema: 1, requestHash, bindingHash, sourceDigest: normalized.sourceDigest,
             normalizedDigest: normalized.normalizedDigest, modelId: READY_IMAGE_MODEL_ID,
-            caption: selectedCaption, phase: "validated" };
+            caption: selectedCaption, phase: "validated",
+            ...(adaptFeed ? { feedAdaptation: feedAdapter.revision } : {}) };
           write(contextFile(row.id), row);
         }
       } finally { releaseAllocation(); }
@@ -139,12 +155,22 @@ function createReadyImageService(ports) {
           fs.renameSync(temporary, staged);
         } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
       }
+      let adaptation = null;
+      if (row.readyImage.feedAdaptation) {
+        if (row.readyImage.feedAdaptation !== feedAdapter?.revision || !normalized.feedSource)
+          fail("ready_image_adaptation_unavailable", 503);
+        adaptation = feedAdapter.stage({ directory, id: row.id, sourceDigest: normalized.sourceDigest,
+          bytes: normalized.feedSource });
+      }
       fault("ready_image_after_staging");
       const admission = { schemaVersion: 1, ticket: input.ticket, editOrderId: admissionOrderId(input.ticket),
         requestHash, mediaKind: "image", title: "Minha imagem", caption: selectedCaption, durationSeconds: null,
         selection: { modelId: READY_IMAGE_MODEL_ID, modelVersion: 1, sourceDigest: normalized.sourceDigest }, quantity: 1 };
       await admit(admission);
       fault("ready_image_after_admission");
+      // Quota is reserved first; one edit is reused even after a lost response/restart.
+      const output = adaptation ? await feedAdapter.adapt(adaptation) : { path: staged, digest: normalized.normalizedDigest };
+      fault("ready_image_after_adaptation");
       const bound = bind({ ticket: input.ticket, editOrderId: admission.editOrderId, title: admission.title,
         caption: selectedCaption, durationSeconds: null, inputHash: bindingHash, mediaKind: "image" });
       fault("ready_image_after_bind");
@@ -153,14 +179,28 @@ function createReadyImageService(ports) {
         fail("allocation_reconciliation_required", 503);
       const finalPath = path.join(found.base, "resultado_final.png");
       if (found.status === "pronto") {
-        if (!fs.existsSync(finalPath) || hash(fs.readFileSync(finalPath)) !== normalized.normalizedDigest ||
+        if (!fs.existsSync(finalPath) || hash(fs.readFileSync(finalPath)) !== output.digest ||
             found.pedido.descricao_instagram !== selectedCaption) fail("order_conflict");
       } else {
+        // The result writer consumes its input. Keep the paid response immutable
+        // so a lost HTTP receipt can reuse it without another edit.
+        const delivery = adaptation ? path.join(directory, `${row.id}.${output.digest}.delivery.png`) : output.path;
+        if (adaptation) {
+          if (fs.existsSync(delivery)) {
+            const stat = fs.lstatSync(delivery);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+                hash(fs.readFileSync(delivery)) !== output.digest) fail("storage_invalid", 503);
+          } else {
+            fs.copyFileSync(output.path, delivery, fs.constants.COPYFILE_EXCL);
+            const fd = fs.openSync(delivery, "r+");
+            try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          }
+        }
         // The customer's caption is authoritative, including when a native context had text.
         orderStorage.writeOrder(found.base, { ...found.pedido, descricao_instagram: selectedCaption,
           edit_calendar_caption: selectedCaption });
         planning.savePlanningArtResult({ pedidosDir: orderRoot, pedidoId: bound.pedidoId,
-          resultadoPath: staged, resultadoMime: "image/png", descricaoInstagram: selectedCaption });
+          resultadoPath: delivery, resultadoMime: "image/png", descricaoInstagram: selectedCaption });
       }
       fault("ready_image_after_result");
       const releaseFinish = acquireAllocationLock();

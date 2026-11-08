@@ -65,7 +65,7 @@ function read(file, maximum = 32768) {
 function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, readClients, writeClients,
   prepareCalendarRequest, currentFreeArtBlocked = () => false, recordFreeArtUse = () => true,
   canReuseCancelledFreeArt = () => false,
-  admissionEnabled = false, observeConnection = null, clock = Date.now, fault = () => {} }) {
+  admissionEnabled = false, observeConnection = null, clock = Date.now, fault = () => {}, readyImageFeedAdapter = null }) {
   if (typeof readClients !== "function" || typeof writeClients !== "function" || typeof prepareCalendarRequest !== "function" ||
       typeof secret !== "string" || secret.length < 32) fail("configuration_invalid", 503);
   const root = path.join(path.resolve(dataDir), "private", "edit-calendar");
@@ -109,7 +109,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret, clock, fault });
   const readyImages = require("./ready-images").createReadyImageService({ enabled: admissionEnabled, root, directories,
     contextFile, read, write: atomicWriteJson, ticketContext, ownerClient, acquireAllocationLock: acquireLock,
-    admit: admission.admit, remainingImages: admission.remainingImages, bind, orderRoot, clock, fault });
+    admit: admission.admit, remainingImages: admission.remainingImages, bind, orderRoot, clock, fault, feedAdapter: readyImageFeedAdapter });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock());
     const id = request.requestId, digest = hash(JSON.stringify(request));

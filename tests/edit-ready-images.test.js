@@ -282,3 +282,113 @@ test("HTTP requires the header ticket before multipart and returns safe-to-edit 
   const repeated = await fetch(url, { method: "POST", headers, body: form() }); assert.equal(repeated.status, 200);
   assert.deepEqual(await repeated.json(), receipt); assert.equal(f.current().artes_mensais_restantes, 9);
 });
+
+function adaptation(t, onRequest = () => {}) {
+  let calls = 0;
+  const adapter = require("../src/company-edit-calendar/ready-image-feed-adaptation").createReadyImageFeedAdapter({
+    apiKey: "synthetic-adaptation-key", fetchImpl: async () => {
+      calls++; await onRequest();
+      const bytes = await sharp({ create: { width: 1152, height: 1440, channels: 3, background: "blue" } }).png().toBuffer();
+      return new Response(JSON.stringify({ data: [{ b64_json: bytes.toString("base64") }] }), { status: 200 });
+    } });
+  return { adapter, calls: () => calls };
+}
+
+test("adaptation reserves one image before its only POST and rejoins the same Feed/Story source", async t => {
+  let f; const ai = adaptation(t, () => {
+    assert.equal(f.current().artes_mensais_restantes, 9);
+    assert.equal(planning.listPlanningArtPending({ pedidosDir: f.dependencies.ordersDir }).artes.length, 0);
+  });
+  f = fixture(t, { ports: { readyImageFeedAdapter: ai.adapter } });
+  const selected = await f.context(f.owner, "both"), file = await f.photo("jpeg", "red", 900, 1600);
+  const receipt = await f.service.submitReadyImage(selected.body, file);
+  assert.deepEqual(await f.service.submitReadyImage(selected.body, file), receipt);
+  const restarted = createEditCalendarService(f.dependencies); t.after(() => restarted.close());
+  assert.deepEqual(await restarted.submitReadyImage(selected.body, file), receipt);
+  assert.equal(ai.calls(), 1); assert.equal(f.current().artes_mensais_restantes, 9);
+  assert.equal(f.current().videos_mensais_restantes, 4);
+  const items = f.source.list(f.owner); assert.equal(items.length, 1);
+  assert.deepEqual([items[0].date, items[0].time, items[0].caption, items[0].destination],
+    [selected.input.date, selected.input.time, selected.body.caption, "both"]);
+  const state = model.freshState(); model.syncSources(state, items, f.companyId, Date.now());
+  const media = createCalendarMedia({ dataDir: f.root, secret, publicOrigin: "https://synthetic.invalid", loadSource: f.source.load });
+  t.after(() => media.close());
+  const prepared = await media.prepare(f.owner, f.companyId, Object.values(state.jobs)[0]);
+  assert.deepEqual([prepared.variants.feed.width, prepared.variants.feed.height], [1080, 1350]);
+  assert.deepEqual([prepared.variants.story.width, prepared.variants.story.height], [1080, 1920]);
+});
+
+test("4:5 needs no paid adaptation, and no image quota cannot call the API", async t => {
+  const ai = adaptation(t), f = fixture(t, { ports: { readyImageFeedAdapter: ai.adapter } });
+  await f.service.submitReadyImage((await f.context()).body, await f.photo("png", "red", 800, 1000));
+  assert.equal(ai.calls(), 0); assert.equal(f.current().artes_mensais_restantes, 9);
+  const clients = f.readClients(); clients[f.owner].artes_mensais_restantes = 0; f.writeClients(clients);
+  await assert.rejects(f.service.submitReadyImage((await f.context()).body, await f.photo()), { code: "billing_required" });
+  assert.equal(ai.calls(), 0); assert.equal(f.current().videos_mensais_restantes, 4);
+});
+
+for (const stage of ["ready_image_after_adaptation", "ready_image_after_bind", "ready_image_after_result"])
+  test(`interruption ${stage} reuses one adaptation and one quota after restart`, async t => {
+    let once = false; const ai = adaptation(t), f = fixture(t, { ports: {
+      readyImageFeedAdapter: ai.adapter, fault: point => { if (point === stage && !once) {
+        once = true; throw Error("synthetic adaptation interruption"); } } } });
+    const selected = await f.context(), file = await f.photo();
+    await assert.rejects(f.service.submitReadyImage(selected.body, file), /synthetic adaptation interruption/);
+    const restarted = createEditCalendarService(f.dependencies); t.after(() => restarted.close());
+    await restarted.submitReadyImage(selected.body, file);
+    assert.equal(ai.calls(), 1); assert.equal(f.current().artes_mensais_restantes, 9);
+    assert.equal(f.source.list(f.owner).length, 1);
+  });
+
+test("legacy accepted photos remain byte-identical when adaptation becomes available", async t => {
+  let once = false; const f = fixture(t, { ports: { fault: point => {
+    if (point === "ready_image_after_staging" && !once) { once = true; throw Error("synthetic legacy interruption"); }
+  } } });
+  const selected = await f.context(), file = await f.photo(), normalized = await normalizeReadyImage(file);
+  await assert.rejects(f.service.submitReadyImage(selected.body, file), /synthetic legacy interruption/);
+  const ai = adaptation(t), restarted = createEditCalendarService({ ...f.dependencies, readyImageFeedAdapter: ai.adapter });
+  t.after(() => restarted.close()); await restarted.submitReadyImage(selected.body, file);
+  const found = planning.findPlanningArtOrder({ pedidosDir: f.dependencies.ordersDir, pedidoId: `edit_${selected.body.requestId.replace(/-/g, "")}` });
+  assert.equal(hash(fs.readFileSync(path.join(found.base, "resultado_final.png"))), normalized.normalizedDigest);
+  assert.equal(ai.calls(), 0);
+});
+
+test("concurrent duplicates and changed content cannot trigger a second paid adaptation", async t => {
+  let started, finish;
+  const began = new Promise(resolve => { started = resolve; }), wait = new Promise(resolve => { finish = resolve; });
+  const ai = adaptation(t, async () => { started(); await wait; });
+  const f = fixture(t, { ports: { readyImageFeedAdapter: ai.adapter } }), selected = await f.context(), file = await f.photo();
+  const first = f.service.submitReadyImage(selected.body, file);
+  await began;
+  try {
+    await assert.rejects(f.service.submitReadyImage(selected.body, file), { code: "edit_calendar_allocation_busy" });
+    assert.equal(ai.calls(), 1);
+  } finally { finish(); }
+  const receipt = await first;
+  await assert.rejects(f.service.submitReadyImage({ ...selected.body, caption: "Outra legenda" }, file),
+    { code: "edit_calendar_order_conflict" });
+  await assert.rejects(f.service.submitReadyImage(selected.body, await f.photo("png", "green")),
+    { code: "edit_calendar_order_conflict" });
+  assert.deepEqual(await f.service.submitReadyImage(selected.body, file), receipt);
+  assert.equal(ai.calls(), 1); assert.equal(f.current().artes_mensais_restantes, 9);
+});
+
+test("failed adaptation cannot finalize or publish the padded original and cannot retry the API", async t => {
+  let calls = 0;
+  const adapter = require("../src/company-edit-calendar/ready-image-feed-adaptation").createReadyImageFeedAdapter({
+    apiKey: "synthetic-key", fetchImpl: async () => { calls++; throw Error("synthetic offline"); } });
+  const f = fixture(t, { ports: { readyImageFeedAdapter: adapter } }), selected = await f.context(), file = await f.photo();
+  for (let i = 0; i < 2; i++) await assert.rejects(f.service.submitReadyImage(selected.body, file),
+    { code: "edit_calendar_ready_image_adaptation_preserved" });
+  assert.equal(calls, 1); assert.equal(f.current().artes_mensais_restantes, 9);
+  assert.equal(f.source.list(f.owner).filter(item => item.imageReady).length, 0);
+  assert.equal(planning.listPlanningArtPending({ pedidosDir: f.dependencies.ordersDir }).artes.length, 0);
+});
+
+test("missing API configuration fails before any balance is reserved", async t => {
+  const adapter = require("../src/company-edit-calendar/ready-image-feed-adaptation").createReadyImageFeedAdapter();
+  const f = fixture(t, { ports: { readyImageFeedAdapter: adapter } }), selected = await f.context();
+  await assert.rejects(f.service.submitReadyImage(selected.body, await f.photo()),
+    { code: "edit_calendar_ready_image_adaptation_unavailable" });
+  assert.equal(f.current().artes_mensais_restantes, 10); assert.equal(f.source.list(f.owner).length, 0);
+});
