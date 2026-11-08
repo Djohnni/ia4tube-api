@@ -95,6 +95,8 @@ const CAROUSELS_DIR = path.join(DATA_DIR, "carrosseis");
 const MONTHLY_PLANNINGS_DIR = path.join(DATA_DIR, "planejamentos_mensais");
 const FREE_ART_CAMPAIGNS_DIR = path.join(DATA_DIR, "campanhas_artes_gratis");
 const CLIENTES_FILE = path.join(DATA_DIR, "clientes.json");
+const { createLoginAttemptProtection } = require("./src/security/login-attempts");
+const loginAttemptProtection = createLoginAttemptProtection({ dataDir: DATA_DIR, secret: JWT_SECRET });
 const ART_READY_OUTBOX_FILE = path.join(
   DATA_DIR,
   "notifications",
@@ -2193,25 +2195,30 @@ app.post("/auth/login", async (req, res, next) => {
   const whatsapp = normalizarLoginId(body.whatsapp);
   const senha = body.senha || "";
 
-  if (!whatsapp || !senha) {
+  if (!whatsapp || typeof senha !== "string" || !senha) {
     return res.status(400).json({ ok: false, error: "login e senha obrigatórios" });
   }
+
+  const loginAttempt = loginAttemptProtection.begin(req, res, whatsapp);
+  if (!loginAttempt) return;
 
   const clientes = readClientes();
   const c = clientes[whatsapp];
 
   if (!c) {
-    return res.status(401).json({ ok: false, error: "Login não encontrado" });
+    return loginAttempt.reject(401, "Login não encontrado");
   }
 
   if (!c.ativo) {
-    return res.status(403).json({ ok: false, error: "Mensalidade inativa" });
+    return loginAttempt.reject(403, "Mensalidade inativa");
   }
 
   const ok = bcrypt.compareSync(senha, c.senha_hash);
   if (!ok) {
-    return res.status(401).json({ ok: false, error: "Senha incorreta" });
+    return loginAttempt.reject(401, "Senha incorreta");
   }
+
+  if (!loginAttempt.accept()) return;
 
   const repairedCompanyLabel = repairAppReviewCompanyLabel(
     whatsapp,
