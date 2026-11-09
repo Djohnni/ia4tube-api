@@ -17,12 +17,45 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
         : code === "edit_calendar_ready_image_invalid" ? "Confira a imagem e tente novamente."
         : code === "edit_calendar_ready_image_adaptation_preserved" ? "A adaptação precisa de atenção. Seu envio foi preservado; não envie outro pedido."
         : code === "edit_calendar_ready_image_adaptation_unavailable" ? "A adaptação está indisponível no momento. Seu envio foi preservado."
+        : code === "edit_calendar_image_caption_preserved" ? "A legenda precisa de atenção. A tentativa foi preservada; não envie outra imagem."
+        : code === "edit_calendar_image_caption_unavailable" ? "Não foi possível criar a legenda neste momento."
         : code === "edit_calendar_story_business_required" ? "Story exige uma conta Instagram profissional (Empresa ou Criador)."
         : "Não foi possível vincular este pedido ao calendário. Confira a conta e a programação.",
-        ...(req.readyImageTicket && [400, 413, 415, 422].includes(status) &&
-          service.readyImageCanEdit(req.readyImageTicket) === true ? { safeToEdit: true } : {}) });
+        ...([400, 413, 415, 422].includes(status) && (req.readyImageTicket &&
+          service.readyImageCanEdit(req.readyImageTicket) === true || req.imageCaptionTicket &&
+          service.imageCaptionCanEdit(req.imageCaptionTicket) === true) ? { safeToEdit: true } : {}) });
     }
   };
+  const captionGuard = createCapabilityRateGuard({ capacity: 20,
+    verifyCapability: body => service.verifyImageCaptionCapability(body.ticket) });
+  const captionHeader = (req, res, next) => {
+    try {
+      const match = req.get("Authorization")?.match(/^EditTicket ([A-Za-z0-9_.-]{80})$/);
+      if (!match) throw Object.assign(new Error("Sessão necessária"), { statusCode: 401, code: "edit_calendar_session_required" });
+      captionGuard.authorize({ body: { ticket: match[1] }, ip: req.ip, socket: req.socket });
+      req.imageCaptionTicket = match[1]; next();
+    } catch (error) {
+      if (error.statusCode === 429) res.set("Retry-After", String(error.retryAfter || 1));
+      res.status(error.statusCode || 403).set("Cache-Control", "no-store")
+        .json({ ok: false, code: error.code || "edit_calendar_context_unavailable" });
+    }
+  };
+  router.post("/empresa/edit/ready-images/caption", captionHeader, (req, res, next) => {
+    if (typeof readyImageUpload !== "function") return res.status(503).json({ ok: false, code: "edit_calendar_admission_disabled" });
+    readyImageUpload(req, res, error => {
+      if (!error) return next();
+      readyImageCleanup(req.file);
+      res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).set("Cache-Control", "no-store")
+        .json({ ok: false, code: "edit_calendar_ready_image_invalid", error: "Confira a imagem e tente novamente.",
+          ...(service.imageCaptionCanEdit(req.imageCaptionTicket) ? { safeToEdit: true } : {}) });
+    });
+  }, call(async req => {
+    try {
+      if (req.body?.ticket !== req.imageCaptionTicket) throw Object.assign(new Error("Sessão divergente"),
+        { statusCode: 403, code: "edit_calendar_context_unavailable" });
+      return await service.generateImageCaption(req.body, req.file);
+    } finally { readyImageCleanup(req.file); }
+  }));
   router.get("/empresa/edit/availability", availabilityAuthenticate, call(req => {
     const policy = freeArtReadPolicy(req) || {};
     return service.availability(req.user, { freeArtBlocked: policy.blocked === true,

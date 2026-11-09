@@ -4103,6 +4103,7 @@ const editAdmissionAuthentication = require("./src/company-edit-calendar/admissi
   enabled: process.env.IA4TUBE_EDIT_ADMISSION_ENABLED === "true", secret: process.env.IA4TUBE_EDIT_ADMISSION_SECRET || "" });
 const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, planningDir: MONTHLY_PLANNINGS_DIR,
   ordersDir: PEDIDOS_DIR, secret: JWT_SECRET, readClients: readClientes,
+  imageCaptionOptions: { apiKey: process.env.OPENAI_API_KEY },
   readyImageFeedAdapter: require("./src/company-edit-calendar/ready-image-feed-adaptation")
     .createReadyImageFeedAdapter({ apiKey: process.env.OPENAI_API_KEY }),
   admissionEnabled: process.env.IA4TUBE_EDIT_ADMISSION_ENABLED === "true",

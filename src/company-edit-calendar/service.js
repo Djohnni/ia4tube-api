@@ -65,7 +65,8 @@ function read(file, maximum = 32768) {
 function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, readClients, writeClients,
   prepareCalendarRequest, currentFreeArtBlocked = () => false, recordFreeArtUse = () => true,
   canReuseCancelledFreeArt = () => false,
-  admissionEnabled = false, observeConnection = null, clock = Date.now, fault = () => {}, readyImageFeedAdapter = null }) {
+  admissionEnabled = false, observeConnection = null, clock = Date.now, fault = () => {}, readyImageFeedAdapter = null,
+  imageCaptionOptions = {} }) {
   if (typeof readClients !== "function" || typeof writeClients !== "function" || typeof prepareCalendarRequest !== "function" ||
       typeof secret !== "string" || secret.length < 32) fail("configuration_invalid", 503);
   const root = path.join(path.resolve(dataDir), "private", "edit-calendar");
@@ -110,6 +111,8 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
   const readyImages = require("./ready-images").createReadyImageService({ enabled: admissionEnabled, root, directories,
     contextFile, read, write: atomicWriteJson, ticketContext, ownerClient, acquireAllocationLock: acquireLock,
     admit: admission.admit, remainingImages: admission.remainingImages, bind, orderRoot, clock, fault, feedAdapter: readyImageFeedAdapter });
+  const imageCaptions = require("./image-caption").createImageCaptionService({ ...imageCaptionOptions,
+    enabled: admissionEnabled, root, directories, ticketContext, ownerClient, remainingImages: admission.remainingImages, clock });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock());
     const id = request.requestId, digest = hash(JSON.stringify(request));
@@ -280,6 +283,8 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
   return Object.freeze({ createContext, bind, admit: admission.admit, admissionStatus: admission.status,
     verifyReadyImageCapability: readyImages.verifyCapability, readyImageCanEdit: readyImages.canEdit,
     readReadyImageContext: readyImages.context, submitReadyImage: readyImages.submit,
+    verifyImageCaptionCapability: imageCaptions.verifyCapability, generateImageCaption: imageCaptions.generate,
+    imageCaptionCanEdit: imageCaptions.canEdit,
     verifyAdmissionCapability: admission.verifyCapability, availability: admission.availability,
     cancelAdmission: admission.cancel, close() { admission.close(); key.fill(0); } });
 }

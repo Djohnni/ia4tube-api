@@ -392,3 +392,51 @@ test("missing API configuration fails before any balance is reserved", async t =
     { code: "edit_calendar_ready_image_adaptation_unavailable" });
   assert.equal(f.current().artes_mensais_restantes, 10); assert.equal(f.source.list(f.owner).length, 0);
 });
+
+test("caption assistance hands only its final text to the unchanged one-credit image/Feed/Story return", async t => {
+  let calls = 0;
+  const f = fixture(t, { ports: { imageCaptionOptions: { apiKey: "synthetic-key", fetchImpl: async () => {
+    calls++; return new Response(JSON.stringify({ status: "completed", output: [{ type: "message",
+      content: [{ type: "output_text", text: "Confira este combo! #MinhaMarca" }] }] }), { status: 200 });
+  } } } });
+  const selected = await f.context(f.owner, "both"), file = await f.photo();
+  const request = { requestId: selected.body.requestId, ticket: selected.body.ticket, guidance: "Destaque o combo #MinhaMarca" };
+  const generated = await f.service.generateImageCaption(request, file);
+  assert.equal(f.current().artes_mensais_restantes, 10);
+  await f.service.submitReadyImage({ ...selected.body, caption: generated.caption }, file);
+  assert.deepEqual(await f.service.generateImageCaption(request, file), generated);
+  const item = f.source.list(f.owner)[0];
+  assert.equal(item.caption, "Confira este combo! #MinhaMarca"); assert.equal(item.destination, "both");
+  assert.equal(item.date, selected.input.date); assert.equal(item.time, selected.input.time);
+  assert.equal(f.current().artes_mensais_restantes, 9); assert.equal(calls, 1);
+});
+
+test("caption HTTP is authenticated before multipart, correctable before its first call and reusable after admission", async t => {
+  let calls = 0, uploads = 0;
+  const f = fixture(t, { ports: { imageCaptionOptions: { apiKey: "synthetic-key", fetchImpl: async () => {
+    calls++; return new Response(JSON.stringify({ status: "completed", output: [{ type: "message", content: [
+      { type: "output_text", text: "Legenda gerada. #MinhaMarca" }] }] }), { status: 200 });
+  } } } });
+  const selected = await f.context(), file = await f.photo(), app = express();
+  const upload = multer({ dest: f.root, limits: { files: 1, fields: 3, parts: 5, fileSize: MAX_INPUT_BYTES } }).single("image");
+  app.use(createEditCalendarRouter({ authenticate: (_req, res) => res.sendStatus(401), botAuthenticate: (_req, res) => res.sendStatus(401),
+    isBotAdmin: () => false, service: f.service, readyImageUpload: (req, res, next) => { uploads++; upload(req, res, next); },
+    readyImageCleanup: uploaded => { if (uploaded?.path && fs.existsSync(uploaded.path)) fs.unlinkSync(uploaded.path); } }));
+  const server = await new Promise(resolve => { const listener = app.listen(0, "127.0.0.1", () => resolve(listener)); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = `http://127.0.0.1:${server.address().port}/empresa/edit/ready-images/caption`;
+  const form = (invalid = false) => {
+    const body = new FormData(); body.set("requestId", selected.body.requestId); body.set("ticket", selected.body.ticket);
+    body.set("guidance", "#MinhaMarca"); body.set("image", new Blob([invalid ? Buffer.from("bad") : fs.readFileSync(file.path)],
+      { type: "image/jpeg" }), "photo.jpeg"); return body;
+  };
+  assert.equal((await fetch(url, { method: "POST", body: form() })).status, 401); assert.equal(uploads, 0);
+  const headers = { Authorization: `EditTicket ${selected.body.ticket}` };
+  const bad = await fetch(url, { method: "POST", headers, body: form(true) });
+  assert.equal(bad.status, 422); assert.equal((await bad.json()).safeToEdit, true); assert.equal(calls, 0);
+  const first = await fetch(url, { method: "POST", headers, body: form() }); assert.equal(first.status, 200);
+  const generated = await first.json(); assert.equal(generated.caption, "Legenda gerada. #MinhaMarca");
+  await f.service.submitReadyImage({ ...selected.body, caption: generated.caption }, file);
+  const retry = await fetch(url, { method: "POST", headers, body: form() }); assert.equal(retry.status, 200);
+  assert.deepEqual(await retry.json(), generated); assert.equal(calls, 1); assert.equal(f.current().artes_mensais_restantes, 9);
+});
