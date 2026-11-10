@@ -53,7 +53,9 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
     try {
       if (req.body?.ticket !== req.imageCaptionTicket) throw Object.assign(new Error("Sessão divergente"),
         { statusCode: 403, code: "edit_calendar_context_unavailable" });
-      return await service.generateImageCaption(req.body, req.file);
+      if (Object.keys(req.query).length && !(Object.keys(req.query).join() === 'mediaKind' && req.query.mediaKind==='video'))
+        throw Object.assign(new Error("Consulta inválida"),{statusCode:400,code:'edit_calendar_input_invalid'});
+      return await service.generateImageCaption(req.query.mediaKind==='video'?{...req.body,mediaKind:'video'}:req.body, req.file);
     } finally { readyImageCleanup(req.file); }
   }));
   router.get("/empresa/edit/availability", availabilityAuthenticate, call(req => {
