@@ -65,6 +65,15 @@ test("context read returns native date/time and paid plus standalone count witho
   assert.equal(fs.existsSync(path.join(f.root, "private/edit-calendar/ready-images")), false);
 });
 
+test("video context reads video quota without reservations, image debits or publication preparation", async t => {
+  const f=await fixture(t,{mediaKind:'video',client:{artes_mensais_restantes:0,artes_avulsas_restantes:0}});
+  const before=f.readClients(),bytes=fs.readFileSync(f.contextPath);
+  const result=await assertNoWrites(()=>f.service.readReadyImageContext(f.ticket,{mediaKind:'video'}));
+  assert.equal(result.remainingVideos,4);assert.equal(result.remainingImages,undefined);assert.equal(result.destination,'reel');
+  assert.deepEqual(f.readClients(),before);assert.deepEqual(fs.readFileSync(f.contextPath),bytes);assert.equal(f.prepares(),1);assert.equal(f.observations(),0);
+  await assert.rejects(f.service.readReadyImageContext(f.ticket+'invalid',{mediaKind:'video'}),{code:'edit_calendar_context_unavailable'});
+});
+
 for (const paid of [false, true]) test(`an eligible Instagram gift is counted once without creating a ledger; paid=${paid}`, async t => {
   const f = await fixture(t, { free: true, paid }), before = f.readClients();
   const result = await assertNoWrites(() => f.service.readReadyImageContext(f.ticket));

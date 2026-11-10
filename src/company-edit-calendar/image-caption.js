@@ -33,7 +33,7 @@ function finalCaption(text, guidance) {
   if (/[\uD800-\uDBFF]$/.test(body)) body = body.slice(0, -1);
   return caption(body + suffix);
 }
-function createImageCaptionService({ enabled, root, directories, ticketContext, ownerClient, remainingImages,
+function createImageCaptionService({ enabled, root, directories, ticketContext, ownerClient, remainingImages, remainingVideos,
   apiKey, fetchImpl = globalThis.fetch, clock = Date.now, timeoutMs = 90000 }) {
   const folder = path.join(root, "image-captions"), filename = id => path.join(folder, `${id}.json`);
   function inspect(ticket) {
@@ -56,7 +56,7 @@ function createImageCaptionService({ enabled, root, directories, ticketContext, 
     return { ok: true, requestId: id, caption: caption(record.caption) };
   }
   async function generate(input, file) {
-    if (!input || Object.keys(input).sort().join() !== "guidance,requestId,ticket" ||
+    if (!input || !['guidance,requestId,ticket','guidance,mediaKind,requestId,ticket'].includes(Object.keys(input).sort().join()) || input.mediaKind!==undefined && input.mediaKind!=='video' ||
         !UUID.test(input.requestId || "") || typeof input.guidance !== "string") fail("input_invalid", 400);
     let row = inspect(input.ticket);
     if (row.id !== input.requestId) fail("order_conflict");
@@ -68,7 +68,7 @@ function createImageCaptionService({ enabled, root, directories, ticketContext, 
     const journal = filename(row.id);
     row = inspect(input.ticket);
     if (fs.existsSync(journal)) return existing(journal, fingerprint, row.id);
-    const remaining = await remainingImages({ owner: row.owner, verifiedClaims: row.sessionIdentity,
+    const remaining = await (input.mediaKind==='video'?remainingVideos:remainingImages)({ owner: row.owner, verifiedClaims: row.sessionIdentity,
       ipIdentity: row.ipIdentity, freeArtBlocked: row.freeArtBlocked });
     row = inspect(input.ticket);
     if (fs.existsSync(journal)) return existing(journal, fingerprint, row.id);

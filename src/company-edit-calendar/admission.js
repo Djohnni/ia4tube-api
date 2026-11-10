@@ -91,10 +91,13 @@ function createEditAdmissionService(ports) {
     const image = quota.monthly.image.remaining, video = quota.monthly.video.remaining;
     if (![image, video, standalone].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error("availability_billing_invalid");
     return { image: image + standalone >= 1, video: video + standalone >= 1,
-      imageCount: image + standalone, freeFeature: status.arte_gratis_ativa === true };
+      imageCount: image + standalone, videoCount: video + standalone, freeFeature: status.arte_gratis_ativa === true };
   }
   // A read-only hint for the new photo list. It never creates/migrates a free grant.
   // The legacy availability wire format remains unchanged for installed Android apps.
+  async function remainingVideos({ owner }) {
+    try { return readPaidAvailability(ownerClient({ whatsapp: owner }).client).videoCount; } catch { return null; }
+  }
   async function remainingImages({ owner, verifiedClaims, ipIdentity = null, freeArtBlocked = false }) {
     let current = ownerClient({ whatsapp: owner }), measured;
     try { measured = readPaidAvailability(current.client); } catch { return null; }
@@ -390,7 +393,7 @@ function createEditAdmissionService(ports) {
       write(contextFile(row.id), row); return response(row);
     } finally { release(); }
   }
-  return Object.freeze({ admit, status, cancel, availability, remainingImages, verifyCapability, assertBind, prepareBind, finishBind,
+  return Object.freeze({ admit, status, cancel, availability, remainingImages, remainingVideos, verifyCapability, assertBind, prepareBind, finishBind,
     claimIdentity(row) { return { schema: 2, contextId: row.id, admissionId: row.admission.admissionId, requestHash: row.admission.requestHash }; },
     close() { key.fill(0); } });
 }

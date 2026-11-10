@@ -43,6 +43,13 @@ test("one image plus guidance produces a caption, preserves requested hashtags a
   assert.equal(JSON.stringify(record).includes(f.input.ticket), false);
 });
 
+test("caption assistance for a video uses video quota with no image quota and never debits either",async t=>{
+ const f=await fixture(t);f.balance(0);f.input.mediaKind='video';let reads=0;
+ const service=createImageCaptionService({...f.ports,remainingVideos:async()=>{reads++;return 1}});
+ const result=await service.generate(f.input,f.file);assert.ok(result.caption);assert.equal(reads,1);assert.equal(f.calls(),1);
+ await service.generate(f.input,f.file);assert.equal(reads,1);assert.equal(f.calls(),1);
+});
+
 test("empty guidance is supported; manual caption assistance never creates an extra image reservation", async t => {
   const f = await fixture(t); f.input.guidance = "";
   assert.equal((await f.service.generate(f.input, f.file)).caption, "Seu pedido merece esse sabor!");

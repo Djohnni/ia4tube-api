@@ -110,9 +110,9 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret, clock, fault });
   const readyImages = require("./ready-images").createReadyImageService({ enabled: admissionEnabled, root, directories,
     contextFile, read, write: atomicWriteJson, ticketContext, ownerClient, acquireAllocationLock: acquireLock,
-    admit: admission.admit, remainingImages: admission.remainingImages, bind, orderRoot, clock, fault, feedAdapter: readyImageFeedAdapter });
+    admit: admission.admit, remainingImages: admission.remainingImages, remainingVideos: admission.remainingVideos, bind, orderRoot, clock, fault, feedAdapter: readyImageFeedAdapter });
   const imageCaptions = require("./image-caption").createImageCaptionService({ ...imageCaptionOptions,
-    enabled: admissionEnabled, root, directories, ticketContext, ownerClient, remainingImages: admission.remainingImages, clock });
+    enabled: admissionEnabled, root, directories, ticketContext, ownerClient, remainingImages: admission.remainingImages, remainingVideos: admission.remainingVideos, clock });
   async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock());
     const id = request.requestId, digest = hash(JSON.stringify(request));

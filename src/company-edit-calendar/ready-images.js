@@ -49,7 +49,7 @@ async function normalizeReadyImage(file, { prepareFeed = false } = {}) {
 
 function createReadyImageService(ports) {
   const { enabled, root, directories, contextFile, read, write, ticketContext, ownerClient,
-    acquireAllocationLock, admit, bind, orderRoot, clock, fault, remainingImages, feedAdapter = null } = ports;
+    acquireAllocationLock, admit, bind, orderRoot, clock, fault, remainingImages, remainingVideos, feedAdapter = null } = ports;
   const directory = path.join(root, "ready-images");
   function inspect(ticket) {
     if (!enabled) fail("admission_disabled", 503);
@@ -60,16 +60,17 @@ function createReadyImageService(ports) {
     return row;
   }
   function verifyCapability(ticket) { inspect(ticket); return hash(ticket); }
-  async function context(ticket) {
+  async function context(ticket, { mediaKind = 'image' } = {}) {
+    if (!['image','video'].includes(mediaKind)) fail('input_invalid',400);
     let row = inspect(ticket);
     if (row.expiresAt <= clock()) fail("context_expired");
-    const remaining = await remainingImages({ owner: row.owner, verifiedClaims: row.sessionIdentity,
+    const remaining = await (mediaKind==='video'?remainingVideos:remainingImages)({ owner: row.owner, verifiedClaims: row.sessionIdentity,
       ipIdentity: row.ipIdentity, freeArtBlocked: row.freeArtBlocked });
     row = inspect(ticket);
     if (row.expiresAt <= clock()) fail("context_expired");
     return { ok: true, requestId: row.id, date: row.request.date, time: row.request.time,
-      destination: row.request.destination === "reel" ? "feed" : row.request.destination,
-      remainingImages: Number.isSafeInteger(remaining) && remaining >= 0 ? remaining : null };
+      destination: mediaKind==='video'?row.request.destination:row.request.destination === "reel" ? "feed" : row.request.destination,
+      [mediaKind==='video'?'remainingVideos':'remainingImages']: Number.isSafeInteger(remaining) && remaining >= 0 ? remaining : null };
   }
   function canEdit(ticket) {
     try {

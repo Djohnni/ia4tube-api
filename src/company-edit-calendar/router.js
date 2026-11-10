@@ -82,9 +82,9 @@ function createEditCalendarRouter({ authenticate, botAuthenticate, isBotAdmin, s
     }
   };
   router.get("/empresa/edit/ready-images/context", readyImageHeader, call(req => {
-    if (Object.keys(req.query).length) throw Object.assign(new Error("Consulta inválida"),
+    if (Object.keys(req.query).length && !(Object.keys(req.query).join() === 'mediaKind' && req.query.mediaKind==='video')) throw Object.assign(new Error("Consulta inválida"),
       { statusCode: 400, code: "edit_calendar_input_invalid" });
-    return service.readReadyImageContext(req.readyImageTicket);
+    return service.readReadyImageContext(req.readyImageTicket,req.query.mediaKind==='video'?{mediaKind:'video'}:undefined);
   }));
   router.post("/empresa/edit/ready-images", readyImageHeader, (req, res, next) => {
     if (typeof readyImageUpload !== "function") return res.status(503).set("Cache-Control", "no-store")
