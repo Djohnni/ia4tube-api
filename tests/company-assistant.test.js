@@ -114,3 +114,29 @@ test("six messages per minute are allowed and a burst cannot add a seventh paid 
   const f=await fixture(t);for(let n=0;n<6;n++)await f.service.message(claims(),{requestId:uuid(),message:"Planejar",photoIds:[]});
   await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Planejar",photoIds:[]}),{code:"assistant_rate_limit"});assert.equal(f.providerCalls.length,6);
 });
+
+test("one photo plus an amount uses concise BRL guidance and prepares scheduling without media generation",async t=>{
+  const f=await fixture(t),s=await draft(f),body=f.providerCalls[0].body;
+  assert.match(body.instructions,/Nunca pergunte se é em reais/);
+  assert.match(body.instructions,/Prepare items imediatamente/);
+  assert.equal(body.text.format.schema.properties.reply.maxLength,120);
+  assert(s.messages.at(-1).text.length<=90);
+  assert.equal(s.draft.items[0].imageText,"R$ 39,90");
+  assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+});
+
+test("sim preserves the same draft, does not spend another chat call and never creates an order",async t=>{
+  const f=await fixture(t),before=await draft(f),input={requestId:uuid(),message:"sim",photoIds:[]};
+  const after=await f.service.message(claims(),input),repeat=await f.service.message(claims(),input);
+  assert.deepEqual(after.draft,before.draft);assert.deepEqual(repeat.draft,before.draft);
+  assert.equal(after.messagesUsed,before.messagesUsed);assert.equal(f.providerCalls.length,1);
+  assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+});
+
+test("a long provider reply is bounded locally with no second call or draft/caption rewrite",async t=>{
+  const f=await fixture(t);
+  f.setOutput({reply:"Envie uma foto. "+"Explicação desnecessária. ".repeat(40),photoDescriptions:[],items:[]});
+  const s=await f.service.message(claims(),{requestId:uuid(),message:"Como enviar?",photoIds:[]});
+  assert(s.messages.at(-1).text.length<=120);assert.equal(f.providerCalls.length,1);assert.equal(s.draft,null);
+  assert.equal(f.submissions.length,0);
+});

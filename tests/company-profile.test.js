@@ -56,6 +56,18 @@ test("a missing optional profile is empty, with no storage allocation or account
   assert.equal(fs.existsSync(f.baseDir), false); f.canariesUnchanged();
 });
 
+test("assistant logo-only HTTP upload preserves all existing profile fields and the other owner",async t=>{
+  const f=await httpFixture(t);
+  await f.put({nome_empresa:"Empresa existente",ramo:"Pizzaria",site:"https://example.com",historia:"Texto preservado"});
+  await f.put({nome_empresa:"Outra empresa"},{auth:"synthetic-b"});
+  const before=(await (await f.get()).json()).profile,other=await (await f.get("","synthetic-b")).json();
+  const response=await f.put({},{logo:await image(),mime:"image/png",filename:"logo.png"});
+  assert.equal(response.status,200);const after=(await response.json()).profile;
+  for(const field of editable)assert.equal(after[field],before[field]);
+  assert.equal(after.has_logo,true);assert.deepEqual(await (await f.get("","synthetic-b")).json(),other);
+  f.canariesUnchanged();
+});
+
 test("all fields can remain optional and blank; absent patches preserve existing text", async t => {
   const f = fixture(t); await f.service.save(ownerA, { profile: {} });
   await f.service.save(ownerA, { profile: { nome_empresa: "  Loja sintetica  ", historia: "Primeira linha\nSegunda linha" } });
