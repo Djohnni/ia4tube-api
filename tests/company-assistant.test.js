@@ -8,7 +8,7 @@ const NOW = Date.parse("2099-01-16T12:00:00Z"), OWNER = "159911205989";
 const claims = (owner=OWNER) => ({whatsapp:owner,company_id:owner,token_version:2,sub:owner});
 async function fixture(t, options={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"i4-assistant-")), client={ativo:true};
-  billing.applyManualPlanPayment(client,plans.getPlan("i4_combo_20i_15v_v1"),{paymentId:"test",paidAt:"2099-01-15T12:00:00Z"});
+  if(!options.free)billing.applyManualPlanPayment(client,plans.getPlan("i4_combo_20i_15v_v1"),{paymentId:"test",paidAt:"2099-01-15T12:00:00Z"});
   const png=await sharp({create:{width:100,height:80,channels:3,background:"#ff8800"}}).png().toBuffer();
   const contextCalls=[],submissions=[],providerCalls=[];let output={reply:"Envie uma foto para preparar seu mês.",photoDescriptions:[],items:[]};
   const service=createAssistantService({root,clock:()=>NOW,pilots:[OWNER],apiKey:"fake-test-key",dispatchSpacingMs:0,
@@ -34,6 +34,18 @@ async function draft(f,kind="image") {
 }
 const confirmation = snapshot => ({draftId:snapshot.draft.id,version:snapshot.draft.version,confirmed:true,items:snapshot.draft.items.map(({id,date,time,destination})=>({id,date,time,destination}))});
 const tick=()=>new Promise(r=>setImmediate(r));
+for(const paid of [true,false])test(`${paid?"paid":"trial"} conversation enforces its own message allowance without changing media credits`,async t=>{
+  const f=await fixture(t,{free:!paid}),limit=paid?120:20,before=structuredClone(f.client);
+  assert.equal((await f.service.state(claims())).messageLimit,limit);
+  await f.service.message(claims(),{requestId:uuid(),message:"Olá",photoIds:[]});
+  const file=path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),saved=JSON.parse(fs.readFileSync(file,"utf8"));
+  const counter=Object.values(saved.counters)[0];counter.messages=limit-1;counter.usd=paid ? .30 : .02;
+  fs.writeFileSync(file,JSON.stringify(saved));
+  const last=await f.service.message(claims(),{requestId:uuid(),message:"Minha última mensagem permitida",photoIds:[]});
+  assert.equal(last.messagesUsed,limit);assert.equal(last.messageLimit,limit);
+  await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Acima do limite",photoIds:[]}),{code:"assistant_conversation_limit"});
+  assert.equal(f.providerCalls.length,2);assert.deepEqual(f.client,before);assert.equal(f.submissions.length,0);
+});
 test("ownership and internal pilot are enforced before any provider call",async t=>{
   const f=await fixture(t);await assert.rejects(f.service.state(claims("other")),{code:"assistant_unavailable"});
   await assert.rejects(f.service.state({...claims(),company_id:"other"}),{code:"assistant_session_required"});assert.equal(f.providerCalls.length,0);

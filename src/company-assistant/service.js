@@ -56,7 +56,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     const standalone = billing.getStandaloneArtStatus(c).artes_avulsas_restantes;
     const paid = billing.isPlanActive(c, new Date(clock()));
     return { images: q.monthly.image.remaining + standalone, videos: q.monthly.video.remaining + standalone, standalone,
-      paid, messages: paid ? 60 : 20, budgetUsd: paid ? 1.5 / 5.5 : .5 / 5.5,
+      paid, messages: paid ? 120 : 20, budgetUsd: paid ? 3 / 5.5 : .5 / 5.5,
       period: paid ? (q.grantRef?.cycleStart || new Date(clock()).toISOString().slice(0, 7)) : "trial" };
   }
   async function facts(claims) {
