@@ -197,7 +197,7 @@ private fun AssistantOrderBoundary(campaign:AssistantCampaign,palette:PremiumHom
 }
 
 @Composable
-private fun AssistantBubble(text:String,user:Boolean,palette:PremiumHomePalette,onReport:(()->Unit)?=null){
+internal fun AssistantBubble(text:String,user:Boolean,palette:PremiumHomePalette,onReport:(()->Unit)?=null){
     Row(Modifier.fillMaxWidth().padding(horizontal=8.dp),horizontalArrangement=if(user)Arrangement.End else Arrangement.Start){
         val foreground=if(user)Color(0xFF211706)else Color(0xFFF6F7F9)
         Column(Modifier.fillMaxWidth(if(user).86f else .94f)

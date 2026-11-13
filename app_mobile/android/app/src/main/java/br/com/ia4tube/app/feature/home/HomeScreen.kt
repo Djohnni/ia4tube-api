@@ -105,7 +105,9 @@ fun HomeScreen(
     cameraRequestKey: Int = 0,
     onCameraAuthRequired: () -> Unit = {},
     onEditCompanyProfile: () -> Unit = {},
-    assistantTokenProvider: () -> String = { "" }
+    assistantTokenProvider: () -> String = { "" },
+    onGuestCreateAccount: () -> Unit = {},
+    onGuestSignIn: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsState()
     val homePalette = premiumHomePalette(premiumTheme)
@@ -177,10 +179,17 @@ fun HomeScreen(
         onLockedFeatureClick = {
             Toast.makeText(context, "Entre na sua conta para acessar esta função.", Toast.LENGTH_SHORT).show()
         },
-        assistantContent = if (br.com.ia4tube.app.BuildConfig.ASSISTANT_HOME_ENABLED && isLoggedIn && assistantTokenProvider().isNotBlank()) {
-            { br.com.ia4tube.app.feature.assistant.AssistantHome(homePalette, assistantTokenProvider,
-                onEditVideoClick, onEditCompanyProfile, onOpenPlans, onOpenPlannedArts) }
-        } else null
+        assistantContent = when {
+            !br.com.ia4tube.app.BuildConfig.ASSISTANT_HOME_ENABLED -> null
+            isLoggedIn && assistantTokenProvider().isNotBlank() -> {
+                { br.com.ia4tube.app.feature.assistant.AssistantHome(homePalette, assistantTokenProvider,
+                    onEditVideoClick, onEditCompanyProfile, onOpenPlans, onOpenPlannedArts) }
+            }
+            else -> {
+                { br.com.ia4tube.app.feature.assistant.GuestAssistantHome(homePalette,
+                    onGuestCreateAccount, onGuestSignIn, onCameraAuthRequired) }
+            }
+        }
     )
 
     if (showPhotoSourceDialog) {

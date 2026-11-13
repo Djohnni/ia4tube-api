@@ -486,6 +486,14 @@ fun IA4TubeNavHost(
             HomeScreen(
                 viewModel = viewModel,
                 assistantTokenProvider = repository::getSavedToken,
+                onGuestCreateAccount = {
+                    pendingProtectedRoute = null
+                    openRegisterScreen()
+                },
+                onGuestSignIn = {
+                    pendingProtectedRoute = null
+                    openLoginScreen()
+                },
                 onOpenOrders = { filter ->
                     MobileAnalytics.track("mobile_meus_pedidos_abriu", tela = "home", payload = mapOf("filtro" to filter.routeValue))
                     navigateProtected(Routes.orders(filter))

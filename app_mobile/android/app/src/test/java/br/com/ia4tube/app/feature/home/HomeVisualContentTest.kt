@@ -35,6 +35,8 @@ import br.com.ia4tube.app.feature.assistant.AssistantAttachment
 import br.com.ia4tube.app.feature.assistant.AssistantCampaign
 import br.com.ia4tube.app.feature.assistant.AssistantDraft
 import br.com.ia4tube.app.feature.assistant.AssistantItem
+import br.com.ia4tube.app.feature.assistant.GuestAssistantHome
+import br.com.ia4tube.app.feature.assistant.GUEST_ASSISTANT_REPLY
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,6 +58,62 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun visitorGetsTheFixedReplyLocallyWithoutRequestingAnyAuthenticatedAction() {
+        HomeHarness(assistant = true, guest = true, firstFree = true, showLogout = false).use { home ->
+            assertNull(home.findTag("home_assistant"))
+            assertNull(home.findTag("assistant_confirm_items"))
+            assertNull(home.findTag("home_logout"))
+            home.writeGuest("Quero preparar as publicações da minha empresa.")
+            home.assertAction("guest_assistant_send", null)
+            assertTrue(home.nodes().any { home.label(it) == GUEST_ASSISTANT_REPLY })
+            assertTrue(home.nodes().any { home.label(it) == "Quero preparar as publicações da minha empresa." })
+            assertEquals("", home.tag("guest_assistant_message").config[SemanticsProperties.EditableText].text)
+            assertTrue(home.events.isEmpty())
+            home.capture("guest108-local-reply.png")
+            home.assertAction("guest_create_account", "register")
+            home.assertAction("guest_sign_in", "login")
+            home.assertAction("guest_assistant_gallery", "auth")
+            home.assertAction("guest_assistant_camera", "auth")
+        }
+    }
+
+    @Test fun visitorConversationStaysBoundedAndHasNoProductionControls() {
+        HomeHarness(assistant = true, guest = true, firstFree = true, showLogout = false).use { home ->
+            for (index in 1..5) {
+                home.writeGuest("Mensagem visitante $index")
+                home.assertAction("guest_assistant_send", null)
+            }
+            assertFalse(home.nodes().any { home.label(it) == "Mensagem visitante 1" })
+            assertFalse(home.nodes().any { home.label(it) == "Mensagem visitante 2" })
+            for (index in 3..5) assertTrue(home.nodes().any { home.label(it) == "Mensagem visitante $index" })
+            assertNull(home.findTag("assistant_confirm_items"))
+            assertNull(home.findTag("assistant_gallery"))
+            assertNull(home.findTag("assistant_camera"))
+            assertTrue(home.events.isEmpty())
+        }
+    }
+
+    @Test @Config(qualifiers = "w320dp-h740dp-xhdpi")
+    fun visitorReplyAndComposerRemainUsableWithTheKeyboardSizedViewport() {
+        HomeHarness(assistant = true, guest = true, firstFree = true, showLogout = false,
+            widthDp = 320, heightDp = 430).use { home ->
+            home.writeGuest("Como funciona?")
+            home.assertAction("guest_assistant_send", null)
+            home.assertTextFits(home.tag("home_guest_assistant"))
+            val composer = home.tag("guest_assistant_composer").boundsInRoot
+            assertTrue(composer.width > 0f && composer.bottom <= 860f)
+            val create = home.tag("guest_create_account")
+            val messages = home.tag("guest_assistant_messages").boundsInRoot
+            assertTrue("The complete registration action remains inside the visible chat",
+                create.boundsInRoot.width > 0f && create.boundsInRoot.height > 0f &&
+                    create.positionInRoot.y >= messages.top && create.positionInRoot.y + create.size.height <= composer.top)
+            val reply = home.nodes().last { it.config.getOrNull(SemanticsProperties.TestTag) == "assistant_bubble_assistant" }
+            assertTrue("The complete local reply is visible above the composer",
+                reply.positionInRoot.y >= messages.top && reply.positionInRoot.y + reply.size.height <= composer.top)
+            home.capture("guest108-narrow-keyboard.png")
+        }
+    }
+
     @Test fun eachChatPhotoHasItsOwnCompactChoicesWithoutTheSequentialDialog() {
         val first=AssistantItem("first","photo-a","image","Oferta","Legenda A","R$ 29,90","2099-01-17","18:11","both")
         val second=first.copy(id="second",photoId="photo-b",caption="Legenda B",imageText="R$ 49,90",date="2099-01-18",time="19:22")
@@ -413,7 +471,8 @@ class HomeVisualContentTest {
         heightDp: Int = 832,
         fontScale: Float = 1f,
         assistant: Boolean = false,
-        chatState: AssistantUiState? = null
+        chatState: AssistantUiState? = null,
+        guest: Boolean = false
     ) : AutoCloseable {
         val events = mutableListOf<String>()
         val widthPx = widthDp * 2
@@ -450,7 +509,9 @@ class HomeVisualContentTest {
                             onLockedFeatureClick = { events += "locked" },
                             onEditCompanyProfile = { events += "company-profile-editor" },
                             assistantContent = if(assistant) ({
-                                if(chatState==null) androidx.compose.material3.Text("Seu assistente", modifier = androidx.compose.ui.Modifier.testTag("home_assistant_fixture"))
+                                if(guest) GuestAssistantHome(premiumHomePalette(PremiumHomeTheme.Black),
+                                    onCreateAccount={events+="register"},onSignIn={events+="login"},onAttachmentAuthRequired={events+="auth"})
+                                else if(chatState==null) androidx.compose.material3.Text("Seu assistente", modifier = androidx.compose.ui.Modifier.testTag("home_assistant_fixture"))
                                 else AssistantContent(assistantState.value!!,premiumHomePalette(PremiumHomeTheme.Black),
                                     onPosts={events+="edit"},onProfile={events+="company-profile-editor"},onPlans={events+="plans"},onCalendar={events+="calendar"},
                                     onInput={events+="input"},onSend={events+="send"},onPlan={events+="plan"},onGallery={events+="gallery"},onCamera={events+="camera"},
@@ -468,6 +529,11 @@ class HomeVisualContentTest {
 
         fun update(value: HomeUiState) { state.value = value; settle() }
         fun chatItem(id:String)=assistantState.value?.snapshot?.draft?.items?.find{it.id==id}
+        fun writeGuest(text: String) {
+            assertTrue(tag("guest_assistant_message").config[SemanticsActions.SetText].action!!
+                .invoke(androidx.compose.ui.text.AnnotatedString(text)))
+            settle()
+        }
 
         fun assertAction(tagName: String, expected: String?) {
             events.clear()
