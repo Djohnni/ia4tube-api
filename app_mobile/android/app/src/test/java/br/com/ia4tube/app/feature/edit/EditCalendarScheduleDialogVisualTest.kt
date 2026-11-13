@@ -49,6 +49,21 @@ import java.time.format.DateTimeFormatter
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class EditCalendarScheduleDialogVisualTest {
+    @Test fun assistantMayChoosePhotoToVideoAndOnlyTheFinalConfirmationEmitsThatKind() {
+        val date=LocalDate.now(ZoneId.of("America/Sao_Paulo")).plusDays(1)
+        val draft=AssistantDraft("format",1,listOf(AssistantItem("i","p","image","Oferta","Legenda","R$ 39,90",date.toString(),"18:00","both")))
+        Harness(date,assistantDraft=draft).use { ui ->
+            assertTrue(ui.text().contains("Receber como"));assertTrue(ui.confirmed.isEmpty())
+            ui.click("Vídeo · 10s");assertTrue(ui.confirmed.isEmpty());ui.assertPlacement("Reels",true,false)
+            assertTrue(ui.text().contains("Usa 1 vídeo do plano."));ui.assertConfirmationVisible()
+            ui.capture("assistant106-photo-to-video.png")
+            ui.click("Confirmar");assertEquals(listOf("video"),ui.confirmedKinds)
+        }
+        Harness(date,assistantDraft=draft,videoBalance=0).use { ui ->
+            assertNotNull(ui.button("Vídeo · 10s").config.getOrNull(SemanticsProperties.Disabled))
+            assertTrue(ui.confirmed.isEmpty())
+        }
+    }
     @Test fun assistantUsesTheSameReadableScheduleAndConfirmsOnlyAfterAllDates() {
         val date=LocalDate.now(ZoneId.of("America/Sao_Paulo")).plusDays(1)
         val item=AssistantItem("i1","p1","image","Oferta","Legenda","R$ 39,90",date.toString(),"18:00","both")
@@ -127,8 +142,9 @@ class EditCalendarScheduleDialogVisualTest {
         }
     }
 
-    private class Harness(date: LocalDate, fontScale: Float = 1f, mediaKind: String? = null,assistantDraft:AssistantDraft?=null) : AutoCloseable {
+    private class Harness(date: LocalDate, fontScale: Float = 1f, mediaKind: String? = null,assistantDraft:AssistantDraft?=null,videoBalance:Int=Int.MAX_VALUE) : AutoCloseable {
         val confirmed = mutableListOf<EditCalendarSchedule>()
+        val confirmedKinds=mutableListOf<String>()
         var dismissed = 0
         private val width = 720
         private val height = 1600
@@ -149,7 +165,7 @@ class EditCalendarScheduleDialogVisualTest {
                     MaterialTheme(colorScheme = scheme) {
                         CompositionLocalProvider(LocalDensity provides Density(2f, fontScale)) {
                             if(assistantDraft!=null)AssistantScheduleFlow(assistantDraft,"Pizzaria",false,null,
-                                onDismiss={dismissed++},onConfirm={rows->confirmed+=rows.map{EditCalendarSchedule(it.date,it.time,it.destination)}})
+                                onDismiss={dismissed++},videoBalance=videoBalance,onConfirm={rows->confirmed+=rows.map{EditCalendarSchedule(it.date,it.time,it.destination)};confirmedKinds+=rows.map{it.kind}})
                             else EditCalendarScheduleDialog(
                                 initial = EditCalendarSchedule(date.toString(), "18:00"),
                                 suggestionCategory = editPostingTimeCategory("Pizzaria"), mediaKind = mediaKind,

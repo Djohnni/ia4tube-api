@@ -29,6 +29,16 @@ class AssistantContractTest {
         assertNull(assistantScheduleInitial(after.copy(date="",time="")))
         assertNull(assistantScheduleInitial(after.copy(date="2000-01-01")))
     }
+    @Test fun choosingVideoRetainsThePhotoCaptionAndImageInformation() {
+        val before=draft();val selected=assistantScheduledItems(before,listOf("2099-02-02|17:48|both"),listOf("video")).single()
+        assertEquals(before.items.single().copy(kind="video",date="2099-02-02",time="17:48"),selected)
+    }
+    @Test fun inactiveContinueInstructionDisappearsFromTheHistoricalProposal() {
+        val message=AssistantMessage("proposal","assistant","Preparei sua publicação. Toque em Continuar para escolher dia e hora.",emptyList())
+        val snapshot=AssistantSnapshot(listOf(message),null,listOf(AssistantCampaign("c","sent",1,1,"proposal")),10,4,true,true,2,120,false)
+        assertEquals("Preparei sua publicação.",assistantDisplayText(message,snapshot))
+        assertEquals(message.text,assistantDisplayText(message,snapshot.copy(draft=draft())))
+    }
     @Test fun preservedDraftAndCampaignAreDifferentFromACompletedPublication() {
         val state=parseAssistantSnapshot(JSONObject("""{"ok":true,"messages":[{"id":"m","role":"assistant","text":"Confira o pedido","photoIds":[]}],
             "draft":{"id":"d","version":2,"items":[{"id":"i","photoId":"p","kind":"image","title":"Oferta","caption":"Confira!","imageText":"R$ 39,90","date":null,"time":null,"destination":"both"}]},

@@ -54,6 +54,25 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun receivedRequestHasItsOwnVisibleBoundaryBeforeTheNextConversation() {
+        val proposal=AssistantMessage("proposal","assistant","Preparei sua publicação. Toque em Continuar para escolher dia e hora.",emptyList())
+        val snapshot=AssistantSnapshot(listOf(proposal,AssistantMessage("next","user","Quero fazer outra publicação.",emptyList())),
+            null,listOf(AssistantCampaign("received","sent",1,1,"proposal")),10,4,true,true,2,120,false)
+        HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
+            val boundary=home.tag("assistant_order_received")
+            assertTrue(home.label(boundary).contains("Pedido recebido"))
+            assertTrue(home.nodes().none{home.label(it).contains("Toque em Continuar")})
+            val next=home.tag("assistant_bubble_user")
+            assertTrue("The acknowledgement closes the previous request before the next customer's message",
+                boundary.positionInRoot.y+boundary.size.height<=next.positionInRoot.y+1f)
+            home.capture("assistant106-order-received.png")
+        }
+        HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot.copy(campaigns=listOf(AssistantCampaign("queued","queued",0,1,"proposal"))),loading=false)).use { home ->
+            val boundary=home.tag("assistant_order_queued")
+            assertTrue(home.label(boundary).contains("Enviando pedido…"))
+            assertFalse(home.label(boundary).contains("Pedido recebido"))
+        }
+    }
     @Test fun readyReplyFitsAtMostThreeLinesOnTheSamsungWidth() {
         val reply="Preparei sua publicação. Toque em Continuar para escolher dia e hora."
         val snapshot=AssistantSnapshot(listOf(AssistantMessage("m","assistant",reply,emptyList())),

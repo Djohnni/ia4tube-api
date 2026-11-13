@@ -127,7 +127,13 @@ internal class AssistantViewModel(private val context:Context,private val curren
         viewModelScope.launch {
             mutable.update { it.copy(busy=true,error=null) }
             try {
-                val t=token();client.confirm(t,draft,items);token();onConfirmed();refresh()
+                val t=token();val campaignId=client.confirm(t,draft,items);token()
+                // The server acknowledged the campaign, not its finished media or publication.
+                mutable.update { ui -> ui.copy(snapshot=ui.snapshot?.let { snapshot ->
+                    snapshot.copy(draft=null,campaigns=if(snapshot.campaigns.any{it.id==campaignId})snapshot.campaigns
+                        else snapshot.campaigns+AssistantCampaign(campaignId,"queued",0,items.size,snapshot.messages.lastOrNull()?.id.orEmpty()))
+                }) }
+                onConfirmed();refresh()
                 mutable.update { it.copy(busy=false) }
                 viewModelScope.launch { for(n in 0 until 12){
                     if(mutable.value.snapshot?.campaigns?.none{it.status=="queued"}==true)break

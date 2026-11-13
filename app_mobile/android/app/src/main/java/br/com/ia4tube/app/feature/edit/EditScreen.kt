@@ -473,6 +473,8 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     sending: Boolean = false,
     statusMessage: String? = null,
     publicationLabel: String? = null,
+    confirmEnabled: Boolean = true,
+    leadingContent: (@Composable () -> Unit)? = null,
     onConfirm: (EditCalendarSchedule) -> Unit) {
     val context = LocalContext.current
     val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
@@ -499,6 +501,7 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
         text = { Column(modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
             if (publicationLabel != null) Text(publicationLabel, style = MaterialTheme.typography.labelLarge)
+            leadingContent?.invoke()
             val dateLabel = date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))
             if (LocalDensity.current.fontScale > 1.15f) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -544,7 +547,7 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
             if (!future) Text("Escolha uma data e um horário futuros.", color = appearance.error)
         } },
         confirmButton = {
-            Button(enabled = future && !sending, shape = buttonShape, modifier = Modifier.heightIn(min = 48.dp),
+            Button(enabled = future && !sending && confirmEnabled, shape = buttonShape, modifier = Modifier.heightIn(min = 48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = appearance.action, contentColor = appearance.surface,
                     disabledContainerColor = appearance.surface, disabledContentColor = appearance.secondary),
                 onClick = { onConfirm(selection) }) { Text(if (sending) "Enviando…" else "Confirmar", fontWeight = FontWeight.SemiBold) }

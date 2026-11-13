@@ -78,7 +78,8 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
     if(reviewing&&state.snapshot?.draft!=null) {
         if(!state.snapshot!!.hasLogo)AssistantLogoDialog(state.busy,state.error,{reviewing=false}){
             logo.launch(arrayOf("image/jpeg","image/png","image/webp"))
-        } else AssistantScheduleFlow(state.snapshot!!.draft!!,state.snapshot!!.businessType,state.busy,state.error,{reviewing=false}){items->
+        } else AssistantScheduleFlow(state.snapshot!!.draft!!,state.snapshot!!.businessType,state.busy,state.error,{reviewing=false},
+            imageBalance=state.snapshot!!.images,videoBalance=state.snapshot!!.videos){items->
             vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}
         }
     }
@@ -94,7 +95,7 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
     onInput:(String)->Unit,onSend:()->Unit,onPlan:()->Unit,onGallery:()->Unit,onCamera:()->Unit,
     onRemove:(String)->Unit,onReview:()->Unit,onReport:(String)->Unit,onContinue:()->Unit) {
     val scroll=rememberScrollState()
-    LaunchedEffect(state.snapshot?.messages?.size,state.attachments.size,state.busy,state.error){
+    LaunchedEffect(state.snapshot?.messages?.size,state.snapshot?.campaigns?.map{it.id to it.status},state.attachments.size,state.busy,state.error){
         if(!state.snapshot?.messages.isNullOrEmpty() || state.attachments.isNotEmpty() || state.busy || state.error!=null){
             withFrameNanos { };scroll.animateScrollTo(scroll.maxValue)
         }
@@ -105,9 +106,10 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
         if(state.loading)LinearProgressIndicator(Modifier.fillMaxWidth(),color=palette.primaryBorder)
         Column(Modifier.weight(1f).fillMaxWidth().testTag("assistant_messages").verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(10.dp)) {
             snapshot?.messages?.forEach { m ->
-                AssistantBubble(m.text,m.role=="user",palette,
-                    onReport=if(m.role=="assistant"&&m.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id)({onReport(m.id)})else null)
+                assistantDisplayText(m,snapshot)?.let { displayed -> AssistantBubble(displayed,m.role=="user",palette,
+                    onReport=if(m.role=="assistant"&&m.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id)({onReport(m.id)})else null) }
                 if(m.photos.isNotEmpty())Text("${m.photos.size} foto(s) enviada(s)",color=palette.textSecondary,fontSize=12.sp)
+                snapshot.campaigns.filter{it.afterMessageId==m.id}.forEach { AssistantOrderBoundary(it,palette) }
             }
             if(state.busy)Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){
                 CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp,color=palette.primaryBorder)
@@ -127,10 +129,8 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
                 Text("Continuar",color=palette.primaryBorder)
             }
         }
-        snapshot?.campaigns?.lastOrNull()?.let { c ->
-            val status=when(c.status){"sent"->"${c.sent} pedido(s) recebido(s). Acompanhe no calendário.";"needs_attention"->"Envio precisa de conferência: ${c.sent} de ${c.total} confirmados. Os anteriores estão preservados.";else->"Enviando seus pedidos: ${c.sent}/${c.total}"}
-            Text(status,color=palette.textSecondary,fontSize=12.sp)
-        }
+        snapshot?.campaigns?.lastOrNull()?.takeIf { c -> c.afterMessageId.isBlank()||snapshot.messages.none{it.id==c.afterMessageId} }
+            ?.let { AssistantOrderBoundary(it,palette) }
         state.error?.let { Text(it,color=MaterialTheme.colorScheme.error,fontSize=13.sp) }
         if(state.error?.contains("Ative a publicação") == true)TextButton(onClick=onCalendar){Text("Abrir Calendário",color=palette.primaryBorder)}
         if(state.retryPending&&!state.busy)TextButton(onClick=onContinue){Text("Continuar com uma nova mensagem",color=palette.primaryBorder,fontSize=12.sp)}
@@ -159,6 +159,32 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
             }
         }
         if(snapshot!=null&&snapshot.images<=0&&snapshot.videos<=0)TextButton(onClick=onPlans){Text("Ver combos",color=palette.primaryBorder)}
+    }
+}
+
+internal fun assistantDisplayText(message:AssistantMessage,snapshot:AssistantSnapshot):String? {
+    if(message.role!="assistant")return message.text
+    val active=snapshot.draft!=null&&message.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id
+    if(active)return message.text
+    // A historical proposal must not tell the customer to press a button that no longer exists.
+    return message.text.replace(Regex("\\s*Toque em Continuar[^\\n]*",RegexOption.IGNORE_CASE),"").trim().takeIf{it.isNotBlank()}
+}
+
+@Composable
+private fun AssistantOrderBoundary(campaign:AssistantCampaign,palette:PremiumHomePalette){
+    val received=campaign.status=="sent"&&campaign.sent==campaign.total
+    val attention=campaign.status=="needs_attention"
+    val title=when{received->"Pedido recebido";attention->"Precisa de atenção";else->"Enviando pedido…"}
+    val color=if(attention)MaterialTheme.colorScheme.error else palette.primaryBorder
+    Column(Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=10.dp).testTag("assistant_order_${campaign.id}"),
+        horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(7.dp)){
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)){
+            HorizontalDivider(Modifier.weight(1f),color=color)
+            Text(title,color=color,fontSize=15.sp,fontWeight=FontWeight.SemiBold)
+            HorizontalDivider(Modifier.weight(1f),color=color)
+        }
+        Text(when{received->"Acompanhe no Calendário.";attention->"${campaign.sent} de ${campaign.total} recebidos. Os confirmados foram preservados.";else->"Confirmando recebimento: ${campaign.sent}/${campaign.total}"},
+            color=palette.textSecondary,fontSize=13.sp)
     }
 }
 
