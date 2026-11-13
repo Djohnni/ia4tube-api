@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -37,6 +39,7 @@ internal class AssistantViewModel(private val context:Context,private val curren
     private val directory=File(context.filesDir,"assistant/"+MessageDigest.getInstance("SHA-256").digest(owner.toByteArray()).joinToString(""){"%02x".format(it)})
     private val mutable=MutableStateFlow(AssistantUiState())
     private val previews=linkedMapOf<String,ByteArray>()
+    private val previewLock=Mutex()
     val state=mutable.asStateFlow()
     private fun token():String { val t=currentToken();if(owner.isBlank()||authenticatedAccountFromJwt(t)!=owner)throw AssistantException("assistant_session_required");return t }
     private fun saveJson(file:File,value:String){
@@ -166,15 +169,17 @@ internal class AssistantViewModel(private val context:Context,private val curren
         }
     }
     suspend fun photoBytes(id:String):ByteArray?=withContext(Dispatchers.IO){
-        token();synchronized(previews){previews[id]}?.let{return@withContext it}
+      previewLock.withLock {
+        token();previews[id]?.let{return@withLock it}
         val bytes=client.photo(token(),id);token()
         val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
         var sample=1;while(maxOf(bounds.outWidth,bounds.outHeight)/sample>640)sample*=2
-        val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply{inSampleSize=sample})?:return@withContext null
+        val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply{inSampleSize=sample})?:return@withLock null
         val output=ByteArrayOutputStream();bitmap.compress(Bitmap.CompressFormat.JPEG,80,output);bitmap.recycle()
         val preview=output.toByteArray();token()
-        synchronized(previews){previews[id]=preview;while(previews.size>8)previews.remove(previews.keys.first())}
+        previews[id]=preview;while(previews.size>8)previews.remove(previews.keys.first())
         preview
+      }
     }
     private fun normalize(uri:Uri):AssistantAttachment {
         directory.mkdirs();val id=UUID.randomUUID().toString();val raw=File(directory,"$id-source.tmp")

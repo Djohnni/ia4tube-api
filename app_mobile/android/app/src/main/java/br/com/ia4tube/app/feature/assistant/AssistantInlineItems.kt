@@ -3,6 +3,7 @@ package br.com.ia4tube.app.feature.assistant
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -12,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -57,25 +59,25 @@ internal fun AssistantInlineItems(draft:AssistantDraft,palette:PremiumHomePalett
                 OutlinedButton(onClick={val d=date?:fallback.toLocalDate();DatePickerDialog(context,{_,y,m,day->
                     onEdit(item.copy(date=LocalDate.of(y,m+1,day).toString()))},d.year,d.monthValue-1,d.dayOfMonth).show()},
                     enabled=!busy,modifier=Modifier.weight(1.2f).heightIn(min=44.dp).testTag("assistant_item_date_${item.id}"),
-                    contentPadding=PaddingValues(horizontal=6.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=palette.primaryBorder)) {
+                    contentPadding=PaddingValues(horizontal=6.dp),border=BorderStroke(1.dp,palette.primaryBorder),colors=ButtonDefaults.outlinedButtonColors(contentColor=palette.primaryBorder)) {
                     Text(date?.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))?:"Escolher dia",fontSize=13.sp)
                 }
                 OutlinedButton(onClick={val t=time?:fallback.toLocalTime();TimePickerDialog(context,{_,h,m->
                     onEdit(item.copy(time=LocalTime.of(h,m).format(DateTimeFormatter.ofPattern("HH:mm"))))},t.hour,t.minute,true).show()},
                     enabled=!busy,modifier=Modifier.weight(1f).heightIn(min=44.dp).testTag("assistant_item_time_${item.id}"),
-                    contentPadding=PaddingValues(horizontal=6.dp),colors=ButtonDefaults.outlinedButtonColors(contentColor=palette.primaryBorder)) {
+                    contentPadding=PaddingValues(horizontal=6.dp),border=BorderStroke(1.dp,palette.primaryBorder),colors=ButtonDefaults.outlinedButtonColors(contentColor=palette.primaryBorder)) {
                     Text(time?.format(DateTimeFormatter.ofPattern("HH:mm"))?:"Horário",fontSize=13.sp)
                 }
             }
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                InlineChoice(if(item.kind=="video")"Reels"else"Feed",item.destination!="story",!busy,Modifier.weight(1f)
+                InlineChoice(if(item.kind=="video")"Reels"else"Feed",item.destination!="story",!busy,palette,Modifier.weight(1f)
                     .testTag("assistant_item_feed_${item.id}")) { onEdit(item.copy(destination=assistantToggleDestination(item.destination,false))) }
-                InlineChoice("Story",item.destination!="feed",!busy,Modifier.weight(1f)
+                InlineChoice("Story",item.destination!="feed",!busy,palette,Modifier.weight(1f)
                     .testTag("assistant_item_story_${item.id}")) { onEdit(item.copy(destination=assistantToggleDestination(item.destination,true))) }
             }
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                InlineChoice("Imagem",item.kind=="image",!busy,Modifier.weight(1f).testTag("assistant_item_image_${item.id}")) { onEdit(item.copy(kind="image")) }
-                InlineChoice("Vídeo · 10s",item.kind=="video",!busy,Modifier.weight(1f).testTag("assistant_item_video_${item.id}")) { onEdit(item.copy(kind="video")) }
+                InlineChoice("Imagem",item.kind=="image",!busy,palette,Modifier.weight(1f).testTag("assistant_item_image_${item.id}")) { onEdit(item.copy(kind="image")) }
+                InlineChoice("Vídeo · 10s",item.kind=="video",!busy,palette,Modifier.weight(1f).testTag("assistant_item_video_${item.id}")) { onEdit(item.copy(kind="video")) }
             }
             if(!assistantItemReady(item))Text("Escolha dia e horário futuros · Brasília",fontSize=11.sp,color=palette.textSecondary)
         }
@@ -83,8 +85,11 @@ internal fun AssistantInlineItems(draft:AssistantDraft,palette:PremiumHomePalett
 }
 
 @Composable
-private fun InlineChoice(label:String,selected:Boolean,enabled:Boolean,modifier:Modifier,onClick:()->Unit) {
+private fun InlineChoice(label:String,selected:Boolean,enabled:Boolean,palette:PremiumHomePalette,modifier:Modifier,onClick:()->Unit) {
     FilterChip(selected=selected,onClick=onClick,enabled=enabled,modifier=modifier.heightIn(min=40.dp),
+        colors=FilterChipDefaults.filterChipColors(containerColor=Color.Transparent,labelColor=palette.textPrimary,
+            selectedContainerColor=palette.primaryBorder,selectedLabelColor=Color(0xFF211706),
+            disabledLabelColor=palette.textSecondary,disabledSelectedContainerColor=palette.panelBorder),
         label={Text(label,fontSize=13.sp)})
 }
 
