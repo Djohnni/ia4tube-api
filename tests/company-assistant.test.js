@@ -140,3 +140,45 @@ test("a long provider reply is bounded locally with no second call or draft/capt
   assert(s.messages.at(-1).text.length<=120);assert.equal(f.providerCalls.length,1);assert.equal(s.draft,null);
   assert.equal(f.submissions.length,0);
 });
+
+test("assistant receives the real photo-to-video capabilities, rather than asking for an uploaded movie",async t=>{
+  const f=await fixture(t);
+  f.setOutput({reply:"Consigo fazer. Envie o vídeo do lanche.",photoDescriptions:[],items:[]});
+  const s=await f.service.message(claims(),{requestId:uuid(),message:"Transforme minha foto em vídeo",photoIds:[]});
+  const payload=JSON.parse(f.providerCalls[0].body.input[0].content[0].text);
+  assert.equal(payload.capabilities.videoFromPhoto,true);assert.equal(payload.capabilities.uploadVideo,false);
+  assert.equal(payload.capabilities.videoSeconds,10);assert.equal(payload.capabilities.voiceNarration,false);
+  assert.equal(payload.capabilities.publishDirectlyFromChat,false);
+  assert.match(s.messages.at(-1).text,/a partir de uma foto/);assert.doesNotMatch(s.messages.at(-1).text,/envie.*vídeo/i);
+  assert.equal(s.draft,null);assert.equal(f.submissions.length,0);
+});
+
+test("a provider's false publication claim cannot become an operational acknowledgement",async t=>{
+  const f=await fixture(t);f.setOutput({reply:"Publiquei sua arte!",photoDescriptions:[],items:[]});
+  const s=await f.service.message(claims(),{requestId:uuid(),message:"Já foi?",photoIds:[]});
+  assert.doesNotMatch(s.messages.at(-1).text,/publiquei/i);assert.equal(s.campaigns.length,0);assert.equal(f.submissions.length,0);
+});
+
+test("format chosen at confirmation sends one video through the same receiver, preserving photo and caption",async t=>{
+  const f=await fixture(t),s=await draft(f),input=confirmation(s);
+  input.items[0].kind="video";f.client.artes_mensais_restantes=0;
+  const receipt=await f.service.confirm(claims(),input);await tick();await f.service.processPending();await tick();
+  assert.equal(f.submissions.length,1);assert.equal(f.submissions[0].data.mediaKind,"video");
+  assert.equal(f.submissions[0].data.showcase.videoId,"d0591ca4-1c6a-470a-9f78-57ba4d266b8c");
+  assert.equal(f.submissions[0].data.imageCaption,s.draft.items[0].caption);
+  const completed=await f.service.state(claims());assert.equal(completed.campaigns[0].afterMessageId,s.messages.at(-1).id);
+  assert.equal(completed.campaigns[0].status,"sent");assert.equal(completed.campaigns[0].sent,1);
+  assert.equal((await f.service.confirm(claims(),input)).campaignId,receipt.campaignId);assert.equal(f.submissions.length,1);
+  await assert.rejects(f.service.confirm(claims(),{...input,items:input.items.map(i=>({...i,kind:"image"}))}),{code:"assistant_request_conflict"});
+});
+
+test("a free image credit cannot be converted into a free video at confirmation",async t=>{
+  const f=await fixture(t,{free:true}),s=await draft(f),input=confirmation(s);input.items[0].kind="video";
+  await assert.rejects(f.service.confirm(claims(),input),{code:"assistant_balance_required"});
+  assert.equal(f.contextCalls.length,0);assert.equal(f.submissions.length,0);
+});
+
+test("invalid output kind is refused before calendar or production",async t=>{
+  const f=await fixture(t),s=await draft(f),input=confirmation(s);input.items[0].kind="audio";
+  await assert.rejects(f.service.confirm(claims(),input),{code:"assistant_draft_changed"});assert.equal(f.contextCalls.length,0);
+});
