@@ -21,6 +21,9 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import br.com.ia4tube.app.feature.calendar.calendarAppearanceTestSchemes
+import br.com.ia4tube.app.feature.assistant.AssistantDraft
+import br.com.ia4tube.app.feature.assistant.AssistantItem
+import br.com.ia4tube.app.feature.assistant.AssistantScheduleFlow
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import org.junit.Assert.*
 import org.junit.Test
@@ -46,6 +49,21 @@ import java.time.format.DateTimeFormatter
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class EditCalendarScheduleDialogVisualTest {
+    @Test fun assistantUsesTheSameReadableScheduleAndConfirmsOnlyAfterAllDates() {
+        val date=LocalDate.now(ZoneId.of("America/Sao_Paulo")).plusDays(1)
+        val item=AssistantItem("i1","p1","image","Oferta","Legenda","R$ 39,90",date.toString(),"18:00","both")
+        val draft=AssistantDraft("proposal",1,listOf(item,item.copy(id="i2",kind="video")))
+        Harness(date,assistantDraft=draft).use { ui ->
+            assertTrue(ui.text().contains("1 de 2 · Oferta"))
+            assertTrue(ui.text().contains("Que dia e hora você quer que seja publicado?"))
+            ui.assertPlacement("Feed",true,false);ui.assertTextFits();ui.assertConfirmationVisible()
+            ui.capture("assistant105-calendar.png")
+            ui.click("Confirmar");assertTrue(ui.confirmed.isEmpty())
+            assertTrue(ui.text().contains("2 de 2 · Oferta"));ui.assertPlacement("Reels",true,false)
+            ui.click("Confirmar");assertEquals(2,ui.confirmed.size)
+            assertTrue(ui.confirmed.all{it.date==date.toString()&&it.destination=="both"})
+        }
+    }
     @Test fun firstDaysRenderTheirRangesWithoutClippingAndOnlyConfirmEmitsASelection() {
         val futureYear = LocalDate.now(ZoneId.of("America/Sao_Paulo")).year + 1
         for (day in 1..2) {
@@ -109,7 +127,7 @@ class EditCalendarScheduleDialogVisualTest {
         }
     }
 
-    private class Harness(date: LocalDate, fontScale: Float = 1f, mediaKind: String? = null) : AutoCloseable {
+    private class Harness(date: LocalDate, fontScale: Float = 1f, mediaKind: String? = null,assistantDraft:AssistantDraft?=null) : AutoCloseable {
         val confirmed = mutableListOf<EditCalendarSchedule>()
         var dismissed = 0
         private val width = 720
@@ -130,7 +148,9 @@ class EditCalendarScheduleDialogVisualTest {
                 IA4TubeTheme {
                     MaterialTheme(colorScheme = scheme) {
                         CompositionLocalProvider(LocalDensity provides Density(2f, fontScale)) {
-                            EditCalendarScheduleDialog(
+                            if(assistantDraft!=null)AssistantScheduleFlow(assistantDraft,"Pizzaria",false,null,
+                                onDismiss={dismissed++},onConfirm={rows->confirmed+=rows.map{EditCalendarSchedule(it.date,it.time,it.destination)}})
+                            else EditCalendarScheduleDialog(
                                 initial = EditCalendarSchedule(date.toString(), "18:00"),
                                 suggestionCategory = editPostingTimeCategory("Pizzaria"), mediaKind = mediaKind,
                                 onDismiss = { dismissed++ }, onConfirm = { confirmed += it })

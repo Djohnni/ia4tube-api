@@ -11,6 +11,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import br.com.ia4tube.app.data.repository.authenticatedAccountFromJwt
+import br.com.ia4tube.app.core.upload.AndroidFileReader
+import br.com.ia4tube.app.data.models.ApiResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +64,21 @@ internal class AssistantViewModel(private val context:Context,private val curren
         catch(e:Exception){mutable.update{it.copy(loading=false,error=errorText(e))}}
     }
     fun reload(){viewModelScope.launch{refresh()}}
+    fun saveLogo(uri:Uri) {
+        if(mutable.value.busy)return
+        viewModelScope.launch {
+            mutable.update { it.copy(busy=true,error=null) }
+            try {
+                val t=token()
+                val file=when(val loaded=AndroidFileReader(context).readUploadFile(uri)) {
+                    is ApiResult.Success -> loaded.value
+                    is ApiResult.Failure -> throw AssistantException("assistant_photo_invalid")
+                }
+                token();client.saveLogo(t,file);token()
+                mutable.update { it.copy(snapshot=it.snapshot?.copy(hasLogo=true)) };refresh()
+            }catch(e:Exception){mutable.update { it.copy(error=errorText(e)) }}finally{mutable.update { it.copy(busy=false) }}
+        }
+    }
     fun report(id:String){viewModelScope.launch{
         try{client.report(token(),id);token();mutable.update{it.copy(error="Resposta sinalizada. Obrigado por avisar.")}}
         catch(e:Exception){mutable.update{it.copy(error=errorText(e))}}
@@ -146,7 +163,7 @@ internal class AssistantViewModel(private val context:Context,private val curren
 internal fun errorText(error:Exception):String=when((error as? AssistantException)?.code){
     "assistant_unavailable"->"O assistente ainda não está disponível para esta conta. Seus outros recursos continuam funcionando."
     "assistant_session_required","social_session_login_required"->"Entre novamente na sua conta."
-    "assistant_logo_required"->"Adicione a logo em Perfil da empresa para personalizar suas artes."
+    "assistant_logo_required"->"Escolha a logo da empresa para continuar."
     "assistant_calendar_required"->"Ative a publicação automática no Calendário e confirme novamente. Nenhuma arte foi criada."
     "assistant_instagram_required"->"Conecte seu Instagram pelo botão acima e confirme novamente. Nenhuma arte foi criada."
     "assistant_balance_required"->"Seu saldo não permite essa quantidade. Escolha menos itens ou veja os combos."

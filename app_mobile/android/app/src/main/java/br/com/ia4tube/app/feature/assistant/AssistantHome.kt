@@ -1,7 +1,5 @@
 package br.com.ia4tube.app.feature.assistant
 
-import android.app.DatePickerDialog
-import android.app.TimePickerDialog
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -44,8 +42,7 @@ import br.com.ia4tube.app.R
 import br.com.ia4tube.app.core.camera.CameraImageStore
 import br.com.ia4tube.app.data.repository.authenticatedAccountFromJwt
 import br.com.ia4tube.app.feature.home.PremiumHomePalette
-import java.time.LocalDate
-import java.time.format.DateTimeFormatter
+import br.com.ia4tube.app.feature.calendar.CalendarAlertDialog
 
 @Composable
 internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:()->Unit,onProfile:()->Unit,onPlans:()->Unit,onCalendar:()->Unit) {
@@ -71,14 +68,19 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
         if(saved&&cameraUri.isNotBlank())vm.attach(Uri.parse(cameraUri));cameraUri=""
     }
     val gallery=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()){uris->vm.attachAll(uris.take(4-state.attachments.size))}
+    val logo=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->uri?.let(vm::saveLogo)}
     AssistantContent(state,palette,onPosts,onProfile,onPlans,onCalendar,
-        onInput=vm::input,onSend={vm.send()},onPlan={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},
+        onInput=vm::input,onSend={if(assistantScheduleRequested(state)){vm.input("");reviewing=true}else vm.send()},onPlan={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},
         onGallery={gallery.launch(arrayOf("image/jpeg","image/png","image/webp"))},
         onCamera={val uri=CameraImageStore(context).createImageUri();cameraUri=uri.toString();camera.launch(uri)},
         onRemove=vm::remove,onReview={reviewing=true},onReport={reporting=it},onContinue=vm::continueConversation)
 
-    if(reviewing&&state.snapshot?.draft!=null)AssistantReviewDialog(state.snapshot!!.draft!!,palette,state.busy,{reviewing=false}){items->
-        vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}
+    if(reviewing&&state.snapshot?.draft!=null) {
+        if(!state.snapshot!!.hasLogo)AssistantLogoDialog(state.busy,state.error,{reviewing=false}){
+            logo.launch(arrayOf("image/jpeg","image/png","image/webp"))
+        } else AssistantScheduleFlow(state.snapshot!!.draft!!,state.snapshot!!.businessType,state.busy,state.error,{reviewing=false}){items->
+            vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}
+        }
     }
     if(reporting.isNotBlank())AlertDialog(onDismissRequest={reporting=""},title={Text("Sinalizar esta resposta?")},
         text={Text("Avise se esta resposta é inadequada ou contém informações perigosas. Ela será registrada para análise.")},
@@ -122,7 +124,7 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
         }
         snapshot?.draft?.let { draft ->
             OutlinedButton(onClick={onReview()},enabled=!state.busy,modifier=Modifier.fillMaxWidth(),border=BorderStroke(1.dp,palette.primaryBorder)){
-                Text("Revisar ${draft.items.size} publicação(ões)",color=palette.primaryBorder)
+                Text("Continuar",color=palette.primaryBorder)
             }
         }
         snapshot?.campaigns?.lastOrNull()?.let { c ->
@@ -180,35 +182,13 @@ private fun AssistantBubble(text:String,user:Boolean,palette:PremiumHomePalette,
 }
 
 @Composable
-private fun AssistantReviewDialog(draft:AssistantDraft,palette:PremiumHomePalette,busy:Boolean,onDismiss:()->Unit,onConfirm:(List<AssistantItem>)->Unit){
-    var items by remember(draft.id){mutableStateOf(draft.items)}
-    val context=LocalContext.current
-    AlertDialog(onDismissRequest={if(!busy)onDismiss()},title={Text("Confira suas publicações")},
-        text={Column(Modifier.heightIn(max=460.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(14.dp)){
-            Text("A criação usa seu saldo. As artes prontas irão para o calendário nas datas escolhidas.")
-            items.forEachIndexed { n,item ->
-                Column(verticalArrangement=Arrangement.spacedBy(5.dp)){
-                    Text("${n+1}. ${item.title} · ${if(item.kind=="video")"Vídeo 10s" else "Imagem"}",fontWeight=FontWeight.Bold)
-                    if(item.imageText.isNotBlank())Text("Na imagem: ${item.imageText}")
-                    Text(item.caption,fontSize=13.sp)
-                    Row(horizontalArrangement=Arrangement.spacedBy(5.dp)){
-                        OutlinedButton(onClick={val date=runCatching{LocalDate.parse(item.date)}.getOrDefault(LocalDate.now().plusDays(1));
-                            DatePickerDialog(context,{_,y,m,d->items=items.toMutableList().also{it[n]=item.copy(date=LocalDate.of(y,m+1,d).toString())}},date.year,date.monthValue-1,date.dayOfMonth).show()
-                        }){Text(runCatching{LocalDate.parse(item.date).format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))}.getOrDefault("Escolher dia"))}
-                        OutlinedButton(onClick={val t=item.time.split(':');TimePickerDialog(context,{_,h,m->items=items.toMutableList().also{it[n]=item.copy(time="%02d:%02d".format(h,m))}},t.getOrNull(0)?.toIntOrNull()?:18,t.getOrNull(1)?.toIntOrNull()?:0,true).show()}){Text(item.time.ifBlank{"Escolher hora"})}
-                    }
-                    Row(verticalAlignment=Alignment.CenterVertically){
-                        val feed=item.destination!="story";val story=item.destination!="feed"
-                        Checkbox(feed,onCheckedChange={v->items=items.toMutableList().also{it[n]=item.copy(destination=if(v&&story)"both" else if(v)"feed" else "story")}})
-                        Text(if(item.kind=="video")"Reels"else"Feed")
-                        Checkbox(story,onCheckedChange={v->items=items.toMutableList().also{it[n]=item.copy(destination=if(v&&feed)"both" else if(v)"story" else "feed")}})
-                        Text("Story")
-                    }
-                    HorizontalDivider()
-                }
-            }
-            Text("Horário de Brasília. Confira valores, legendas e datas antes de confirmar.",fontSize=12.sp)
+private fun AssistantLogoDialog(busy:Boolean,error:String?,onDismiss:()->Unit,onChoose:()->Unit){
+    CalendarAlertDialog(onDismissRequest={if(!busy)onDismiss()},title={Text("Logo da empresa")},
+        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){
+            Text("Escolha sua logo para personalizar a arte.")
+            if(busy)CircularProgressIndicator(Modifier.size(24.dp))
+            if(error!=null)Text(error,color=MaterialTheme.colorScheme.error)
         }},
-        confirmButton={TextButton(onClick={onConfirm(items)},enabled=!busy&&items.all{it.date.isNotBlank()&&it.time.isNotBlank()}){Text(if(busy)"Confirmando…"else"Criar e programar")}},
+        confirmButton={TextButton(onClick=onChoose,enabled=!busy){Text(if(busy)"Salvando…"else"Escolher logo")}},
         dismissButton={TextButton(onClick=onDismiss,enabled=!busy){Text("Voltar")}})
 }

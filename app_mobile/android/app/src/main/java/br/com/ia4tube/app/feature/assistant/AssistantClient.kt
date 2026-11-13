@@ -1,6 +1,7 @@
 package br.com.ia4tube.app.feature.assistant
 
 import br.com.ia4tube.app.BuildConfig
+import br.com.ia4tube.app.data.models.UploadFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -21,7 +22,7 @@ internal data class AssistantDraft(val id: String, val version: Int, val items: 
 internal data class AssistantCampaign(val id: String, val status: String, val sent: Int, val total: Int)
 internal data class AssistantSnapshot(val messages: List<AssistantMessage>, val draft: AssistantDraft?,
     val campaigns: List<AssistantCampaign>, val images: Int, val videos: Int, val connected: Boolean,
-    val hasLogo: Boolean, val used: Int, val limit: Int, val budgetReached: Boolean)
+    val hasLogo: Boolean, val used: Int, val limit: Int, val budgetReached: Boolean, val businessType: String = "")
 internal class AssistantException(val code: String) : Exception(code)
 
 internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }
@@ -35,7 +36,7 @@ internal fun parseAssistantSnapshot(j: JSONObject): AssistantSnapshot {
         val photos=m.optJSONArray("photoIds") ?: JSONArray()
         AssistantMessage(m.getString("id"),m.getString("role"),m.getString("text"),(0 until photos.length()).map { photos.getString(it) })
     }.orEmpty(),draft,j.optJSONArray("campaigns")?.objects()?.map { AssistantCampaign(it.getString("id"),it.getString("status"),it.getInt("sent"),it.getInt("total")) }.orEmpty(),
-        j.optInt("images"),j.optInt("videos"),j.optBoolean("connected"),j.optBoolean("hasLogo"),j.optInt("messagesUsed"),j.optInt("messageLimit",20),j.optBoolean("budgetReached"))
+        j.optInt("images"),j.optInt("videos"),j.optBoolean("connected"),j.optBoolean("hasLogo"),j.optInt("messagesUsed"),j.optInt("messageLimit",20),j.optBoolean("budgetReached"),j.optString("businessType"))
 }
 
 internal class AssistantClient {
@@ -66,6 +67,16 @@ internal class AssistantClient {
     suspend fun message(token:String,id:String,text:String,photos:List<String>)=parseAssistantSnapshot(execute(request(token,"/messages",
         json(JSONObject().put("requestId",id).put("message",text).put("photoIds",JSONArray(photos))))))
     suspend fun report(token:String,id:String){execute(request(token,"/report",json(JSONObject().put("messageId",id))))}
+    suspend fun saveLogo(token:String,file:UploadFile) {
+        if(token.isBlank())throw AssistantException("assistant_session_required")
+        if(file.bytes.isEmpty()||file.bytes.size>5*1024*1024||file.contentType !in setOf("image/png","image/jpeg","image/webp"))throw AssistantException("assistant_photo_invalid")
+        // An empty profile patch changes only the logo, using the existing profile lock and validation.
+        val body=MultipartBody.Builder().setType(MultipartBody.FORM).addFormDataPart("profile","{}")
+            .addFormDataPart("logo",file.fileName,file.bytes.toRequestBody(file.contentType.toMediaType())).build()
+        val result=execute(Request.Builder().url(BuildConfig.API_BASE.trimEnd('/')+"/company/profile")
+            .header("Authorization","Bearer $token").header("Cache-Control","no-store").put(body).build())
+        if(result.optJSONObject("profile")?.optBoolean("has_logo")!=true)throw AssistantException("assistant_logo_required")
+    }
     suspend fun confirm(token:String,draft:AssistantDraft,items:List<AssistantItem>):String {
         val rows=JSONArray();items.forEach { rows.put(JSONObject().put("id",it.id).put("date",it.date).put("time",it.time).put("destination",it.destination)) }
         return execute(request(token,"/confirm",json(JSONObject().put("draftId",draft.id).put("version",draft.version).put("confirmed",true).put("items",rows)))).getString("campaignId")

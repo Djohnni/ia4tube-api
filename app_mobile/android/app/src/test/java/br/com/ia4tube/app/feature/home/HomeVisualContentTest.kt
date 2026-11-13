@@ -54,6 +54,18 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun readyReplyFitsAtMostThreeLinesOnTheSamsungWidth() {
+        val reply="Preparei sua publicação. Toque em Continuar para escolher dia e hora."
+        val snapshot=AssistantSnapshot(listOf(AssistantMessage("m","assistant",reply,emptyList())),
+            null,emptyList(),10,4,true,true,1,120,false)
+        HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
+            val node=home.nodes().first{home.label(it)==reply&&it.config.getOrNull(SemanticsActions.GetTextLayoutResult)!=null}
+            val layouts=mutableListOf<TextLayoutResult>()
+            assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
+            assertTrue(layouts.isNotEmpty());assertTrue(layouts.all{it.lineCount<=3&&!it.hasVisualOverflow})
+            home.capture("assistant105-short-reply.png")
+        }
+    }
     @Test fun assistantIconHeaderAndDistinctMessagesGiveConversationMostOfTheScreen() {
         val snapshot=AssistantSnapshot(listOf(
             AssistantMessage("u1","user","Quero preparar minhas publicações.",emptyList()),

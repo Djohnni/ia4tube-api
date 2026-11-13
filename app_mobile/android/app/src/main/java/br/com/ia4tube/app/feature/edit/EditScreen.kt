@@ -470,6 +470,9 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     mediaKind: String? = null,
     showDestinations: Boolean = true,
     destinationError: String? = null,
+    sending: Boolean = false,
+    statusMessage: String? = null,
+    publicationLabel: String? = null,
     onConfirm: (EditCalendarSchedule) -> Unit) {
     val context = LocalContext.current
     val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
@@ -483,18 +486,19 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     val clockFormat = remember { DateTimeFormatter.ofPattern("HH:mm") }
     val buttonShape = RoundedCornerShape(14.dp)
     val editDate = {
-        DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
+        if (!sending) DatePickerDialog(context, { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
             date.year, date.monthValue - 1, date.dayOfMonth).show()
     }
     val editTime = {
-        TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
+        if (!sending) TimePickerDialog(context, { _, hour, minute -> time = LocalTime.of(hour, minute) },
             time.hour, time.minute, true).show()
     }
-    CalendarAlertDialog(onDismissRequest = onDismiss,
+    CalendarAlertDialog(onDismissRequest = { if (!sending) onDismiss() },
         title = { Text("Que dia e hora você quer que seja publicado?", style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold) },
         text = { Column(modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            if (publicationLabel != null) Text(publicationLabel, style = MaterialTheme.typography.labelLarge)
             val dateLabel = date.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))
             if (LocalDensity.current.fontScale > 1.15f) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -510,22 +514,23 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
             if (showDestinations) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     EditPlacementChoice(when (mediaKind) { "image" -> "Feed"; "video" -> "Reels"; else -> "Feed/Reels" },
-                        destination != "story", destination != "feed", Modifier.weight(1f)) { checked ->
+                        destination != "story", destination != "feed" && !sending, Modifier.weight(1f)) { checked ->
                         destination = if (checked) "both" else "story"
                     }
-                    EditPlacementChoice("Story", destination != "feed", destination != "story", Modifier.weight(1f)) { checked ->
+                    EditPlacementChoice("Story", destination != "feed", destination != "story" && !sending, Modifier.weight(1f)) { checked ->
                         destination = if (checked) "both" else "feed"
                     }
                 }
             }
             if (destinationError != null) Text(destinationError, style = MaterialTheme.typography.bodySmall, color = appearance.error)
+            if (statusMessage != null) Text(statusMessage, style = MaterialTheme.typography.bodySmall, color = appearance.error)
             Text("Sugestão de horário para você baseado no seu negócio", style = MaterialTheme.typography.bodyMedium)
             suggestionCategory.slots.forEach { slot ->
                 val window = editPostingTimeWindow(slot.time, date)
                 val available = window.selection(date) != null
                 val selected = time >= window.start && time <= window.end
                 OutlinedButton(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                    shape = buttonShape, colors = calendarOutlinedButtonColors(), enabled = available,
+                    shape = buttonShape, colors = calendarOutlinedButtonColors(), enabled = available && !sending,
                     border = BorderStroke(if (selected) 2.dp else 1.dp,
                         if (available) appearance.action else appearance.secondary), onClick = {
                         // Recheck the same day; never roll the customer's date forward.
@@ -539,12 +544,12 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
             if (!future) Text("Escolha uma data e um horário futuros.", color = appearance.error)
         } },
         confirmButton = {
-            Button(enabled = future, shape = buttonShape, modifier = Modifier.heightIn(min = 48.dp),
+            Button(enabled = future && !sending, shape = buttonShape, modifier = Modifier.heightIn(min = 48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = appearance.action, contentColor = appearance.surface,
                     disabledContainerColor = appearance.surface, disabledContentColor = appearance.secondary),
-                onClick = { onConfirm(selection) }) { Text("Confirmar", fontWeight = FontWeight.SemiBold) }
+                onClick = { onConfirm(selection) }) { Text(if (sending) "Enviando…" else "Confirmar", fontWeight = FontWeight.SemiBold) }
         },
-        dismissButton = { TextButton(colors = calendarTextButtonColors(), onClick = onDismiss) { Text("Voltar") } })
+        dismissButton = { TextButton(colors = calendarTextButtonColors(), enabled = !sending, onClick = onDismiss) { Text("Voltar") } })
 }
 
 @Composable
