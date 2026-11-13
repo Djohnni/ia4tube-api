@@ -8,6 +8,9 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.Snapshot
@@ -20,6 +23,8 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import br.com.ia4tube.app.ui.text.UiText
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import br.com.ia4tube.app.feature.assistant.AssistantContent
@@ -338,6 +343,10 @@ class HomeVisualContentTest {
             activity.setContent {
                 IA4TubeTheme {
                     CompositionLocalProvider(LocalDensity provides Density(2f, fontScale)) {
+                        Box(Modifier.fillMaxSize()) {
+                        // WindowManager in this test runner keeps its original display height.
+                        // Apply the keyboard-sized viewport to Compose itself as well as the bitmap.
+                        Box(if(assistant&&heightDp<600)Modifier.height(heightDp.dp)else Modifier.fillMaxSize()) {
                         HomeVisualContent(state = state.value, palette = premiumHomePalette(PremiumHomeTheme.Black),
                             premiumTheme = PremiumHomeTheme.Black, firstFreeArtMode = firstFree, showLogout = showLogout,
                             onThemeSelected = { events += "theme:${it.name}" },
@@ -356,6 +365,8 @@ class HomeVisualContentTest {
                                     onInput={events+="input"},onSend={events+="send"},onPlan={events+="plan"},onGallery={events+="gallery"},onCamera={events+="camera"},
                                     onRemove={events+="remove"},onReview={events+="review"},onReport={events+="report"},onContinue={events+="continue"})
                             }) else null)
+                        }
+                        }
                     }
                 }
             }
