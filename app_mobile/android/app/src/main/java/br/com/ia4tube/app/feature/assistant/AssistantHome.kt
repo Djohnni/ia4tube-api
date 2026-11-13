@@ -40,6 +40,7 @@ import java.time.format.DateTimeFormatter
 @Composable
 internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:()->Unit,onProfile:()->Unit,onPlans:()->Unit,onCalendar:()->Unit) {
     val context=LocalContext.current
+    val typing=WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)>0
     val owner=authenticatedAccountFromJwt(token())
     val vm:AssistantViewModel=viewModel(key="assistant-$owner",factory=AssistantViewModelFactory(context,token))
     val state by vm.state.collectAsState()
@@ -75,11 +76,11 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
                 Text("Preparando…",color=palette.textSecondary,fontSize=13.sp)
             }
         }
-        if(snapshot?.messages.isNullOrEmpty())OutlinedButton(onClick={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},enabled=!state.busy,
+        if(!typing&&snapshot?.messages.isNullOrEmpty())OutlinedButton(onClick={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},enabled=!state.busy,
             border=BorderStroke(1.dp,palette.primaryBorder),modifier=Modifier.testTag("assistant_plan_month")){
             Text("Planejar meu mês",color=palette.textPrimary)
         }
-        if(snapshot!=null&&!snapshot.hasLogo)TextButton(onClick=onProfile){Text("Adicionar logo da empresa",color=palette.primaryBorder)}
+        if(!typing&&snapshot!=null&&!snapshot.hasLogo)TextButton(onClick=onProfile){Text("Adicionar logo da empresa",color=palette.primaryBorder)}
         if(state.attachments.isNotEmpty())Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
             state.attachments.forEach { p ->
                 val bitmap=remember(p.file.path){BitmapFactory.decodeFile(p.file.path,BitmapFactory.Options().apply{inSampleSize=4})?.asImageBitmap()}
@@ -125,7 +126,7 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
             Text("${snapshot.images} imagens · ${snapshot.videos} vídeos",color=palette.textSecondary,fontSize=11.sp)
         }
         if(snapshot!=null&&snapshot.images<=0&&snapshot.videos<=0)TextButton(onClick=onPlans){Text("Ver combos",color=palette.primaryBorder)}
-        Text("Assistente de IA · confira as informações antes de confirmar.",fontSize=11.sp,color=palette.textSecondary)
+        if(!typing)Text("Assistente de IA · confira as informações antes de confirmar.",fontSize=11.sp,color=palette.textSecondary)
     }
     if(reviewing&&state.snapshot?.draft!=null)AssistantReviewDialog(state.snapshot!!.draft!!,palette,state.busy,{reviewing=false}){items->
         vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}

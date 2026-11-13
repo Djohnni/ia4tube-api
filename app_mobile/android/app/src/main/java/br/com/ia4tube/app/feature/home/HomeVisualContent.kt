@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -108,6 +111,7 @@ internal fun HomeVisualContent(
     assistantContent: (@Composable () -> Unit)? = null
 ) {
     val scroll = rememberScrollState()
+    val assistantTyping = assistantContent != null && WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val scope = rememberCoroutineScope()
     var otherForms by rememberSaveable { mutableStateOf(false) }
     var more by rememberSaveable { mutableStateOf(false) }
@@ -124,7 +128,7 @@ internal fun HomeVisualContent(
         else "$credits imagens disponíveis"
 
     Column(
-        Modifier.fillMaxSize().background(Brush.verticalGradient(
+        Modifier.fillMaxSize().then(if(assistantContent != null) Modifier.imePadding() else Modifier).background(Brush.verticalGradient(
             listOf(palette.panelGradient.first(), palette.screenBackground, palette.screenBackground)
         )).drawWithCache {
             // Static ambient light: native gradients cached at the current size, without a blur layer.
@@ -161,7 +165,7 @@ internal fun HomeVisualContent(
                 .padding(horizontal = 20.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            HomeMetallicHeading(palette)
+            if (!assistantTyping) HomeMetallicHeading(palette)
             if (state.loading || state.summaryLoading) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().testTag("home_loading"), color = palette.primaryBorder,
                     trackColor = palette.panelBorder.copy(alpha = 0.15f))
@@ -169,10 +173,12 @@ internal fun HomeVisualContent(
             state.error?.let { Text(it.asString(), color = MaterialTheme.colorScheme.error, fontSize = 16.sp) }
             state.summaryError?.let { Text(it.asString(), color = MaterialTheme.colorScheme.error, fontSize = 16.sp) }
 
+            if (!assistantTyping) {
             HomeVisualShortcut("Instagram", R.drawable.home_instagram_3d, "home_instagram", palette,
                 subtitle = "conecte seu instagram ao iA4tube", onClick = onOpenInstagram)
             HomeVisualShortcut("Calendário", R.drawable.home_calendar_3d, "home_calendar", palette,
                 accessibilityLabel = "Minhas artes planejadas", onClick = onOpenPlannedArts)
+            }
             Spacer(Modifier.height(8.dp))
             if (assistantContent != null) Box(Modifier.weight(1f).fillMaxWidth()) { assistantContent() } else BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 HomeVisualCreation("Posts prontos", R.drawable.home_ready_posts_3d, "home_ready_posts", palette,
@@ -207,7 +213,7 @@ internal fun HomeVisualContent(
                     .padding(horizontal = 10.dp, vertical = 12.dp).testTag("home_company_profile_editor"))
             Spacer(Modifier.height(8.dp))
         }
-        HomeVisualFooter(palette, credits,
+        if (!assistantTyping) HomeVisualFooter(palette, credits,
             onHome = { otherForms = false; scope.launch { scroll.scrollTo(0) } },
             onCombo = lockable(onOpenPlans), onMore = { more = true })
     }
