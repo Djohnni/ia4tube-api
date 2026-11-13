@@ -260,6 +260,10 @@ class HomeVisualContentTest {
             home.assertAction("home_instagram", "instagram")
             home.assertAction("home_calendar", "calendar")
             home.assertAction("home_footer_more", null)
+            for (tag in listOf("home_multiple_photos", "home_printed_materials", "home_carousel")) {
+                assertNull("The temporary shortcut is not exposed in More", home.findTag(tag))
+            }
+            home.capture("home110-more-simplified.png")
             home.assertAction("home_company_profile_editor", "company-profile-editor")
             home.assertAction("home_footer_more", null)
             home.assertAction("home_create_image", "monthly-planning")
@@ -273,7 +277,7 @@ class HomeVisualContentTest {
             assertNull(home.findTag("home_printed_materials"))
             home.assertAction("home_company_profile_editor", "company-profile-editor")
             home.assertAction("home_other_forms", null)
-            home.assertAction("home_printed_materials", "locked")
+            assertNull(home.findTag("home_printed_materials"))
             home.assertAction("home_company_profile_editor", "company-profile-editor")
         }
     }
@@ -343,9 +347,9 @@ class HomeVisualContentTest {
             home.assertAction("home_other_forms", null)
             assertEquals("Criar imagens", home.label(home.tag("home_create_image")))
             home.assertAction("home_create_image", "monthly-planning")
-            home.assertAction("home_multiple_photos", "create-art")
-            home.assertAction("home_printed_materials", "company-profile")
-            home.assertAction("home_carousel", "carousel")
+            for (tag in listOf("home_multiple_photos", "home_printed_materials", "home_carousel")) {
+                assertNull(home.findTag(tag))
+            }
             home.assertAction("home_other_forms", null)
             assertNull(home.findTag("home_create_image"))
             assertNull(home.findTag("home_carousel"))
@@ -363,7 +367,7 @@ class HomeVisualContentTest {
             assertEquals("Criar imagens", home.label(home.tag("home_create_image")))
             home.assertAction("home_create_image", "monthly-planning")
             for (tag in listOf("home_multiple_photos", "home_printed_materials", "home_carousel")) {
-                home.assertAction(tag, "locked")
+                assertNull(home.findTag(tag))
             }
             home.assertAction("home_other_forms", null)
             assertNull(home.findTag("home_create_image"))
@@ -653,7 +657,7 @@ class HomeVisualContentTest {
             val scroll = tag("home_scroll")
             val range = scroll.config[SemanticsProperties.VerticalScrollAxisRange]
             val maximum = range.maxValue()
-            val expandedTags = listOf("home_create_image", "home_multiple_photos", "home_printed_materials", "home_carousel")
+            val expandedTags = listOf("home_create_image", "home_company_profile_editor")
             // Both branches require actual expanded items; a lost recomposition must fail.
             expandedTags.forEach { tag(it) }
             assertTrue("The scroll range must be finite and non-negative: $maximum", maximum.isFinite() && maximum >= 0f)

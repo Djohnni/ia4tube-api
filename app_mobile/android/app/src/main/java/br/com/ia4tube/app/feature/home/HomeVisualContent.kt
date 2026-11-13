@@ -84,6 +84,9 @@ import br.com.ia4tube.app.feature.orders.OrderListFilter
 import br.com.ia4tube.app.ui.text.asString
 import kotlinx.coroutines.launch
 
+// Temporarily hide only these Home shortcuts; their destinations and callbacks remain intact.
+private const val ADDITIONAL_CREATION_SHORTCUTS_VISIBLE = false
+
 /** Presentation only: no session, repository, navigation controller or business work is created here. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -206,12 +209,14 @@ internal fun HomeVisualContent(
             if (otherForms && assistantContent == null) {
                 HomeVisualMenuAction("Criar imagens", "home_create_image", palette,
                     onClick = onMonthlyPlanningClick)
+                if (ADDITIONAL_CREATION_SHORTCUTS_VISIBLE) {
                 HomeVisualMenuAction("Várias fotos", "home_multiple_photos", palette, firstFreeArtMode,
                     onClick = lockable(onCreateArtEmpresa))
                 HomeVisualMenuAction("Mat. Impresso", "home_printed_materials", palette, firstFreeArtMode,
                     onClick = lockable(onCompanyProfile))
                 HomeVisualMenuAction("Post Deslizante", "home_carousel", palette, firstFreeArtMode,
                     description = state.carrosseisRestantes?.let { "$it disponíveis" }, onClick = lockable(onCarouselClick))
+                }
             }
             if (assistantContent == null) Text("Perfil da empresa", color = palette.textPrimary, fontSize = 16.sp,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
@@ -241,9 +246,11 @@ internal fun HomeVisualContent(
                 if (assistantContent != null) {
                     Text("Outras formas de criar", color = palette.textSecondary, fontSize = 16.sp)
                     HomeVisualMenuAction("Criar imagens", "home_create_image", palette, onClick = dismissAndRun(onMonthlyPlanningClick))
+                    if (ADDITIONAL_CREATION_SHORTCUTS_VISIBLE) {
                     HomeVisualMenuAction("Várias fotos", "home_multiple_photos", palette, firstFreeArtMode, onClick = lockable(dismissAndRun(onCreateArtEmpresa)))
                     HomeVisualMenuAction("Mat. Impresso", "home_printed_materials", palette, firstFreeArtMode, onClick = lockable(dismissAndRun(onCompanyProfile)))
                     HomeVisualMenuAction("Post Deslizante", "home_carousel", palette, firstFreeArtMode, onClick = lockable(dismissAndRun(onCarouselClick)))
+                    }
                     HomeVisualMenuAction("Perfil da empresa", "home_company_profile_editor", palette, onClick = dismissAndRun(onEditCompanyProfile))
                     HorizontalDivider(color = palette.panelBorder)
                 }
