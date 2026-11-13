@@ -19,8 +19,11 @@ import java.util.concurrent.TimeUnit
 internal data class CompanyProfileSnapshot(
     val profile: CompanyProfile,
     val hasLogo: Boolean,
-    val updatedAt: String?
+    val updatedAt: String?,
+    val account: CompanyAccountIdentity? = null
 )
+
+internal data class CompanyAccountIdentity(val provider: String, val login: String)
 
 internal interface CompanyProfileBackend {
     suspend fun read(token: String): ApiResult<CompanyProfileSnapshot>
@@ -129,7 +132,19 @@ internal class CompanyProfileApiClient(
                 instagram = field("instagram"), facebook = field("facebook"), outrosLinks = field("outros_links"),
                 historia = field("historia"), endereco = field("endereco"), cidade = field("cidade"),
                 estado = field("estado"), cep = field("cep"), email = field("email"), site = field("site")
-            ), hasLogo, (updated as? String))
+            ), hasLogo, (updated as? String), parseAccount(response.optJSONObject("account")))
+        }
+
+        private fun parseAccount(value: JSONObject?): CompanyAccountIdentity? {
+            val fields = value ?: return null
+            val provider = fields.opt("provider") as? String ?: return null
+            val login = fields.opt("login") as? String ?: return null
+            if (login.isBlank() || login.length > 254 || login.any { it <= '\u0020' || it == '\u007f' }) return null
+            return when (provider) {
+                "google" -> if (Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$").matches(login)) CompanyAccountIdentity(provider, login) else null
+                "whatsapp" -> if (login.length <= 200 && !Regex("^(google|facebook|apple|microsoft)_").containsMatchIn(login)) CompanyAccountIdentity(provider, login) else null
+                else -> null
+            }
         }
 
         private fun authFailure() = ApiResult.Failure("Entre novamente para acessar o perfil.", 401, "company_profile_session_required")

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.data.api.CompanyProfileBackend
 import br.com.ia4tube.app.data.api.CompanyProfileSnapshot
+import br.com.ia4tube.app.data.api.CompanyAccountIdentity
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.UploadFile
 import kotlinx.coroutines.CancellationException
@@ -29,7 +30,8 @@ internal data class CompanyProfileEditorState(
     val dirty: Boolean = false,
     val hasLogo: Boolean = false,
     val message: String? = null,
-    val authRequired: Boolean = false
+    val authRequired: Boolean = false,
+    val account: CompanyAccountIdentity? = null
 )
 
 internal class CompanyProfileEditorViewModel(
@@ -79,7 +81,9 @@ internal class CompanyProfileEditorViewModel(
                 when (val result = backend.read(token)) {
                     is ApiResult.Failure -> if (matches(token, expectedEpoch) && revision == expectedRevision) showFailure(result)
                     is ApiResult.Success -> {
-                        if (!matches(token, expectedEpoch) || revision != expectedRevision) return@launch
+                        if (!matches(token, expectedEpoch) || readVersion != expectedReadVersion) return@launch
+                        mutable.update { it.copy(account = result.value.account) }
+                        if (revision != expectedRevision) return@launch
                         remoteKnown = true
                         // A new account with no saved remote profile must retain its old local profile.
                         if (result.value.updatedAt == null) {
@@ -226,6 +230,7 @@ internal class CompanyProfileEditorViewModel(
         epoch == expectedEpoch && session == token && currentToken() == token
     private fun fail(message: String) = mutable.update { it.copy(message = message) }
     private fun showFailure(value: ApiResult.Failure) = mutable.update {
-        it.copy(message = value.message, authRequired = value.statusCode == 401)
+        it.copy(message = value.message, authRequired = value.statusCode == 401,
+            account = if (value.statusCode == 401) null else it.account)
     }
 }

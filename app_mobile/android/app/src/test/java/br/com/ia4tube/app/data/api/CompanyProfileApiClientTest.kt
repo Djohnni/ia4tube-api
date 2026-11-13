@@ -13,6 +13,28 @@ import java.util.concurrent.TimeUnit
 
 /** Local fake HTTP only. No account, payment, generated art or production request. */
 class CompanyProfileApiClientTest {
+    @Test fun accountIdentityIsOptionalReadOnlyAndSeparateFromBusinessContacts() {
+        val profile = CompanyProfile(email = "business@example.invalid", whatsapp = "other-contact")
+        val payload = JSONObject(response(profile)).put("account", JSONObject().put("provider", "google").put("login", "owner@example.invalid"))
+        val snapshot = CompanyProfileApiClient.parse(payload.toString())
+        assertEquals(CompanyAccountIdentity("google", "owner@example.invalid"), snapshot.account)
+        assertEquals(profile, snapshot.profile)
+        assertFalse(CompanyProfileApiClient.encode(snapshot.profile).has("account"))
+        assertNull(CompanyProfileApiClient.parse(response(profile)).account)
+        payload.put("account", JSONObject().put("provider", "whatsapp").put("login", "47900112233"))
+        assertEquals(CompanyAccountIdentity("whatsapp", "47900112233"), CompanyProfileApiClient.parse(payload.toString()).account)
+    }
+
+    @Test fun malformedOrUnsupportedAccountIdentityCannotExposeAnInternalGoogleIdentifier() {
+        for ((provider, login) in listOf("google" to "google_private_subject", "whatsapp" to "google_private_subject",
+            "unknown" to "owner@example.invalid", "google" to "bad\u0000@example.invalid", "google" to "",
+            "whatsapp" to "x".repeat(201))) {
+            val payload = JSONObject(response()).put("account", JSONObject().put("provider", provider).put("login", login))
+            assertNull(CompanyProfileApiClient.parse(payload.toString()).account)
+            assertEquals(CompanyProfile(), CompanyProfileApiClient.parse(payload.toString()).profile)
+        }
+    }
+
     private fun response(profile: CompanyProfile = CompanyProfile(), logo: Boolean = false, updated: Any = JSONObject.NULL) =
         JSONObject().put("ok", true).put("profile", CompanyProfileApiClient.encode(profile)
             .put("has_logo", logo).put("updated_at", updated)).toString()

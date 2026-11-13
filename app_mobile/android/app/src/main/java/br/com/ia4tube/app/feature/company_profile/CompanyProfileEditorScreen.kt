@@ -1,6 +1,7 @@
 package br.com.ia4tube.app.feature.company_profile
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -45,8 +46,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -67,6 +70,7 @@ internal fun CompanyProfileEditorScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val fileReader = remember { AndroidFileReader(context.applicationContext) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -89,7 +93,11 @@ internal fun CompanyProfileEditorScreen(
     CompanyProfileEditorContent(state, viewModel::edit, viewModel::save,
         onChooseLogo = { picker.launch(arrayOf("image/png", "image/jpeg", "image/webp")) },
         onRemoveLogo = viewModel::removeLogo, onRefresh = { viewModel.open(force = true) },
-        onBack = goBack, onAuthRequired = onAuthRequired)
+        onBack = goBack, onAuthRequired = onAuthRequired,
+        onCopyLogin = { login ->
+            clipboard.setText(AnnotatedString(login))
+            Toast.makeText(context, "Login copiado", Toast.LENGTH_SHORT).show()
+        })
 }
 
 @Composable
@@ -101,7 +109,8 @@ internal fun CompanyProfileEditorContent(
     onRemoveLogo: () -> Unit,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
-    onAuthRequired: () -> Unit
+    onAuthRequired: () -> Unit,
+    onCopyLogin: (String) -> Unit = {}
 ) {
     val enabled = !state.saving && !state.readingLogo
     val palette = remember { premiumHomePalette(PremiumHomeTheme.Black) }
@@ -122,6 +131,23 @@ internal fun CompanyProfileEditorContent(
                 modifier = Modifier.heightIn(min = 48.dp)) { Text("Voltar") }
             Text("Perfil da empresa", color = palette.textPrimary,
                 style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            if (!state.authRequired) ProfileEditorSection("Minha conta", "account", palette) {
+                val account = state.account
+                if (account != null) {
+                    Text(if (account.provider == "google") "Google" else "WhatsApp",
+                        color = palette.textSecondary, style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.testTag("company_account_provider"))
+                    Text("Login", color = palette.textSecondary, style = MaterialTheme.typography.labelMedium)
+                    Text(account.login, color = palette.textPrimary, style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.fillMaxWidth().testTag("company_account_login"))
+                    OutlinedButton(onClick = { onCopyLogin(account.login) }, colors = outlineColors,
+                        border = BorderStroke(1.dp, palette.primaryBorder.copy(alpha = 0.6f)),
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("company_account_copy")) {
+                        Text("Copiar login")
+                    }
+                } else Text(if (state.loading) "Carregando sua conta…" else "Não foi possível consultar o login. Toque em Atualizar.",
+                    color = palette.textSecondary, style = MaterialTheme.typography.bodyMedium)
+            }
             if (state.loading || state.saving || state.readingLogo) {
                 CircularProgressIndicator(Modifier.size(26.dp), color = palette.primaryBorder)
                 Text(when { state.saving -> "Salvando perfil…"; state.readingLogo -> "Preparando logo…"; else -> "Carregando perfil…" },

@@ -21,6 +21,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.Density
 import br.com.ia4tube.app.core.company.CompanyProfile
+import br.com.ia4tube.app.data.api.CompanyAccountIdentity
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
 import org.junit.Assert.*
 import org.junit.Test
@@ -41,6 +42,20 @@ import java.io.File
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class CompanyProfileEditorContentTest {
+    @Test fun accountLoginIsReadOnlyAndCopyUsesOnlyTheRegistrationIdentifier() {
+        for (identity in listOf(CompanyAccountIdentity("google", "owner@example.invalid"), CompanyAccountIdentity("whatsapp", "47900112233"))) {
+            Harness(CompanyProfileEditorState(profile = CompanyProfile(email = "business@example.invalid", whatsapp = "other-contact"), account = identity)).use { ui ->
+                assertTrue(ui.text().contains("Minha conta"))
+                assertTrue(ui.text().contains(if (identity.provider == "google") "Google" else "WhatsApp"))
+                assertTrue(ui.text().contains(identity.login)); assertTrue(ui.events.isEmpty())
+                assertNull(ui.tag("company_account_login").config.getOrNull(SemanticsActions.SetText))
+                ui.click("company_account_copy")
+                assertEquals(listOf(identity.login), ui.copies); assertEquals(listOf("copy-login"), ui.events)
+                ui.capture("company-account111-${identity.provider}.png")
+            }
+        }
+    }
+
     @Test fun blankFormExposesAllOptionalFieldsAndSaveIsAnExplicitAction() {
         Harness().use { ui ->
             assertTrue(ui.events.isEmpty())
@@ -112,6 +127,7 @@ class CompanyProfileEditorContentTest {
     private class Harness(initial: CompanyProfileEditorState = CompanyProfileEditorState(), fontScale: Float = 1f) : AutoCloseable {
         val state = mutableStateOf(initial)
         val events = mutableListOf<String>()
+        val copies = mutableListOf<String>()
         private val controller = Robolectric.buildActivity(ComponentActivity::class.java)
         private val activity = controller.get()
         private val main = shadowOf(Looper.getMainLooper())
@@ -127,7 +143,8 @@ class CompanyProfileEditorContentTest {
                             onEdit = { transform -> events += "edit"; state.value = state.value.copy(profile = transform(state.value.profile)) },
                             onSave = { events += "save" }, onChooseLogo = { events += "choose-logo" },
                             onRemoveLogo = { events += "remove-logo" }, onRefresh = { events += "refresh" },
-                            onBack = { events += "back" }, onAuthRequired = { events += "auth" })
+                            onBack = { events += "back" }, onAuthRequired = { events += "auth" },
+                            onCopyLogin = { copies += it; events += "copy-login" })
                     }
                 }
             }

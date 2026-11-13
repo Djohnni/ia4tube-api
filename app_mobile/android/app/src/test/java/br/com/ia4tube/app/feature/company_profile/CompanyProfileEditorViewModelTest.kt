@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModelStore
 import br.com.ia4tube.app.core.company.CompanyProfile
 import br.com.ia4tube.app.data.api.CompanyProfileBackend
 import br.com.ia4tube.app.data.api.CompanyProfileSnapshot
+import br.com.ia4tube.app.data.api.CompanyAccountIdentity
 import br.com.ia4tube.app.data.models.ApiResult
 import br.com.ia4tube.app.data.models.UploadFile
 import kotlinx.coroutines.CompletableDeferred
@@ -23,6 +24,52 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CompanyProfileEditorViewModelTest {
+    @Test fun identityLoadsWithoutASavedBusinessProfileAndDoesNotChangeWithEditedContacts() = runTest(dispatcher) {
+        val identity = CompanyAccountIdentity("google", "owner@example.invalid")
+        val fake = Fake().also { it.readAction = { ApiResult.Success(snapshot(updated = null).copy(account = identity)) } }
+        val vm = model(fake); vm.open(); runCurrent()
+        assertEquals(identity, vm.state.value.account)
+        assertTrue(writes.isEmpty()); assertEquals(0, fake.saves)
+        vm.edit { it.copy(email = "business@example.invalid", whatsapp = "other-contact") }
+        vm.save(); runCurrent()
+        assertEquals(identity, vm.state.value.account)
+        assertEquals("business@example.invalid", cache[token]?.profile?.email)
+    }
+
+    @Test fun accountReadCanFinishDuringBusinessTypingWithoutOverwritingTheDraft() = runTest(dispatcher) {
+        val identity = CompanyAccountIdentity("whatsapp", "47900112233")
+        val gate = CompletableDeferred<ApiResult<CompanyProfileSnapshot>>()
+        val fake = Fake().also { it.readAction = { gate.await() } }
+        val vm = model(fake); vm.open(); runCurrent()
+        vm.edit { it.copy(nomeEmpresa = "Rascunho preservado") }
+        gate.complete(ApiResult.Success(snapshot().copy(account = identity))); runCurrent()
+        assertEquals(identity, vm.state.value.account)
+        assertEquals("Rascunho preservado", vm.state.value.profile.nomeEmpresa)
+        assertTrue(vm.state.value.dirty); assertTrue(writes.isEmpty())
+    }
+
+    @Test fun accountChangeClearsIdentityAndRejectsLateDataFromThePreviousSession() = runTest(dispatcher) {
+        val gate = CompletableDeferred<ApiResult<CompanyProfileSnapshot>>()
+        val fake = Fake().also { it.readAction = { withContext(NonCancellable) { gate.await() } } }
+        val vm = model(fake); vm.open(); runCurrent()
+        token = "synthetic-b"
+        val identityB = CompanyAccountIdentity("google", "b@example.invalid")
+        fake.readAction = { ApiResult.Success(snapshot(updated = null).copy(account = identityB)) }
+        vm.open(); assertNull(vm.state.value.account); runCurrent()
+        gate.complete(ApiResult.Success(snapshot().copy(account = CompanyAccountIdentity("whatsapp", "47900112233")))); runCurrent()
+        assertEquals(identityB, vm.state.value.account)
+        token = ""; vm.open(); runCurrent(); assertNull(vm.state.value.account); assertTrue(vm.state.value.authRequired)
+    }
+
+    @Test fun authenticationFailureClearsTheDisplayedIdentityWithoutDiscardingBusinessText() = runTest(dispatcher) {
+        val fake = Fake().also { it.readAction = { ApiResult.Success(snapshot().copy(account = CompanyAccountIdentity("google", "owner@example.invalid"))) } }
+        val vm = model(fake); vm.open(); runCurrent()
+        vm.edit { it.copy(nomeEmpresa = "Texto preservado") }
+        fake.readAction = { ApiResult.Failure("Entre novamente", 401) }
+        vm.open(force = true); runCurrent()
+        assertNull(vm.state.value.account); assertEquals("Texto preservado", vm.state.value.profile.nomeEmpresa)
+    }
+
     private val dispatcher = StandardTestDispatcher()
     private val owners = ViewModelStore()
     private var token = "synthetic-a"
