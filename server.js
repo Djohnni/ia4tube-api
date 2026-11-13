@@ -2266,7 +2266,11 @@ app.post("/auth/login", async (req, res, next) => {
 
 // Perfil
 app.use("/company/profile", auth, createCompanyProfileRouter({
-  baseDir: path.join(DATA_DIR, "company_profiles")
+  baseDir: path.join(DATA_DIR, "company_profiles"),
+  readClient: owner => {
+    const clients = readClientes();
+    return Object.hasOwn(clients, owner) ? clients[owner] : null;
+  }
 }));
 
 app.get("/me", auth, (req, res) => {

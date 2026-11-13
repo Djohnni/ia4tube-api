@@ -3,8 +3,9 @@
 const express = require("express"), multer = require("multer");
 const { createCompanyProfileService } = require("./service");
 const { MAX_LOGO_BYTES, MAX_PROFILE_PART_BYTES, ownerHash, fail } = require("./model");
+const { companyAccountIdentity } = require("./account");
 
-function createCompanyProfileRouter({ baseDir }) {
+function createCompanyProfileRouter({ baseDir, readClient = () => null }) {
   const router = express.Router(), service = createCompanyProfileService({ baseDir });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_LOGO_BYTES, files: 1, fields: 2, parts: 3,
     fieldSize: MAX_PROFILE_PART_BYTES, fieldNameSize: 64, headerPairs: 64 } }).single("logo");
@@ -27,7 +28,13 @@ function createCompanyProfileRouter({ baseDir }) {
     res.set("Cache-Control", "private, no-store"); res.vary("Authorization");
     try { ownerHash(req.user?.whatsapp); next(); } catch (error) { sendError(res, error); }
   });
-  router.get("/", (req, res) => { try { res.json(service.get(req.user.whatsapp)); } catch (error) { sendError(res, error); } });
+  router.get("/", (req, res) => { try {
+    const owner = req.user.whatsapp;
+    const snapshot = service.get(owner);
+    let account = null;
+    try { account = companyAccountIdentity(owner, readClient(owner)); } catch {}
+    res.json({ ...snapshot, account });
+  } catch (error) { sendError(res, error); } });
   router.get("/logo", (req, res) => {
     try { const bytes = service.logo(req.user.whatsapp); res.set("X-Content-Type-Options", "nosniff").type("png").send(bytes); }
     catch (error) { sendError(res, error); }
