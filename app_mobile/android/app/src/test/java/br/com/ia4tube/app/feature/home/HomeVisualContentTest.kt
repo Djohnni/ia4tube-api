@@ -59,7 +59,7 @@ class HomeVisualContentTest {
             AssistantMessage("u1","user","Quero preparar minhas publicações.",emptyList()),
             AssistantMessage("m1","assistant","Envie suas fotos e eu ajudo a organizar.",emptyList())),
             null,emptyList(),12,1,true,false,2,120,false)
-        HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
+        HomeHarness(assistant=true,heightDp=832,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
             val instagram=home.tag("home_instagram").boundsInRoot
             val brand=home.tag("home_brand_icon").boundsInRoot
             val calendar=home.tag("home_calendar").boundsInRoot

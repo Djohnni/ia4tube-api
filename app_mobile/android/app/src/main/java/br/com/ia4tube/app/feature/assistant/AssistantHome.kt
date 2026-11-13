@@ -133,7 +133,7 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
         if(state.error?.contains("Ative a publicação") == true)TextButton(onClick=onCalendar){Text("Abrir Calendário",color=palette.primaryBorder)}
         if(state.retryPending&&!state.busy)TextButton(onClick=onContinue){Text("Continuar com uma nova mensagem",color=palette.primaryBorder,fontSize=12.sp)}
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal=4.dp,vertical=6.dp).testTag("assistant_composer"),verticalAlignment=Alignment.CenterVertically){
+        Row(Modifier.fillMaxWidth().padding(horizontal=4.dp,vertical=6.dp).heightIn(min=48.dp).testTag("assistant_composer"),verticalAlignment=Alignment.CenterVertically){
             BasicTextField(value=state.input,onValueChange=onInput,
                 enabled=!state.busy&&!state.retryPending,modifier=Modifier.weight(1f).padding(horizontal=10.dp,vertical=12.dp).testTag("assistant_message"),maxLines=5,
                 textStyle=TextStyle(color=palette.textPrimary,fontSize=16.sp),cursorBrush=SolidColor(palette.primaryBorder),
