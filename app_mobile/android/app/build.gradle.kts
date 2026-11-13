@@ -51,8 +51,8 @@ android {
         applicationId = "com.ia4tube.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 101
-        versionName = "0.2.88"
+        versionCode = 102
+        versionName = "0.2.89"
         buildConfigField("boolean", "ASSISTANT_HOME_ENABLED", providers.gradleProperty("ia4tubeAssistantHome").map { it.toBooleanStrict().toString() }.getOrElse("false"))
 
         buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())

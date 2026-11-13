@@ -2,8 +2,12 @@ package br.com.ia4tube.app.feature.assistant
 
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -40,7 +44,17 @@ import java.time.format.DateTimeFormatter
 @Composable
 internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:()->Unit,onProfile:()->Unit,onPlans:()->Unit,onCalendar:()->Unit) {
     val context=LocalContext.current
-    val typing=WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)>0
+    // Resize only while this chat is mounted; leave the previous screens' window mode intact.
+    DisposableEffect(context) {
+        val activity=generateSequence(context as Context){(it as? ContextWrapper)?.baseContext}
+            .filterIsInstance<Activity>().firstOrNull()
+        val window=activity?.window
+        val previousMode=window?.attributes?.softInputMode
+        if(window!=null&&previousMode!=null)window.setSoftInputMode(
+            (previousMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        onDispose { if(previousMode!=null)window?.setSoftInputMode(previousMode) }
+    }
     val owner=authenticatedAccountFromJwt(token())
     val vm:AssistantViewModel=viewModel(key="assistant-$owner",factory=AssistantViewModelFactory(context,token))
     val state by vm.state.collectAsState()
@@ -51,8 +65,33 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
         if(saved&&cameraUri.isNotBlank())vm.attach(Uri.parse(cameraUri));cameraUri=""
     }
     val gallery=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()){uris->vm.attachAll(uris.take(4-state.attachments.size))}
+    AssistantContent(state,palette,onPosts,onProfile,onPlans,onCalendar,
+        onInput=vm::input,onSend={vm.send()},onPlan={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},
+        onGallery={gallery.launch(arrayOf("image/jpeg","image/png","image/webp"))},
+        onCamera={val uri=CameraImageStore(context).createImageUri();cameraUri=uri.toString();camera.launch(uri)},
+        onRemove=vm::remove,onReview={reviewing=true},onReport={reporting=it},onContinue=vm::continueConversation)
+
+    if(reviewing&&state.snapshot?.draft!=null)AssistantReviewDialog(state.snapshot!!.draft!!,palette,state.busy,{reviewing=false}){items->
+        vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}
+    }
+    if(reporting.isNotBlank())AlertDialog(onDismissRequest={reporting=""},title={Text("Sinalizar esta resposta?")},
+        text={Text("Avise se esta resposta é inadequada ou contém informações perigosas. Ela será registrada para análise.")},
+        confirmButton={TextButton(onClick={vm.report(reporting);reporting=""}){Text("Sinalizar")}},
+        dismissButton={TextButton(onClick={reporting=""}){Text("Voltar")}})
+}
+
+@Composable
+internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
+    onPosts:()->Unit,onProfile:()->Unit,onPlans:()->Unit,onCalendar:()->Unit,
+    onInput:(String)->Unit,onSend:()->Unit,onPlan:()->Unit,onGallery:()->Unit,onCamera:()->Unit,
+    onRemove:(String)->Unit,onReview:()->Unit,onReport:(String)->Unit,onContinue:()->Unit) {
+    val typing=WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)>0
     val scroll=rememberScrollState()
-    LaunchedEffect(state.snapshot?.messages?.size,state.busy){scroll.animateScrollTo(scroll.maxValue)}
+    LaunchedEffect(state.snapshot?.messages?.size,state.attachments.size,state.busy,state.error){
+        if(!state.snapshot?.messages.isNullOrEmpty() || state.attachments.isNotEmpty() || state.busy || state.error!=null){
+            withFrameNanos { };scroll.animateScrollTo(scroll.maxValue)
+        }
+    }
     Column(Modifier.fillMaxSize().border(1.dp,palette.panelBorder,RoundedCornerShape(20.dp)).padding(12.dp)
         .testTag("home_assistant"),verticalArrangement=Arrangement.spacedBy(7.dp)) {
         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
@@ -61,12 +100,12 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
         }
         val snapshot=state.snapshot
         if(state.loading)LinearProgressIndicator(Modifier.fillMaxWidth(),color=palette.primaryBorder)
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-            if(snapshot?.messages.isNullOrEmpty())AssistantBubble("Vamos preparar as publicações da sua empresa?",false,palette)
+        Column(Modifier.weight(1f).fillMaxWidth().testTag("assistant_messages").verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(10.dp)) {
+            if(snapshot?.messages.isNullOrEmpty())AssistantBubble("Vamos preparar seus posts?",false,palette)
             snapshot?.messages?.forEach { m ->
                 AssistantBubble(m.text,m.role=="user",palette)
                 if(m.role=="assistant"&&m.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id)
-                    TextButton(onClick={reporting=m.id},contentPadding=PaddingValues(0.dp)){
+                    TextButton(onClick={onReport(m.id)},contentPadding=PaddingValues(0.dp)){
                         Text("Sinalizar resposta",color=palette.textSecondary,fontSize=11.sp)
                     }
                 if(m.photos.isNotEmpty())Text("${m.photos.size} foto(s) enviada(s)",color=palette.textSecondary,fontSize=12.sp)
@@ -75,8 +114,7 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
                 CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp,color=palette.primaryBorder)
                 Text("Preparando…",color=palette.textSecondary,fontSize=13.sp)
             }
-        }
-        if(!typing&&snapshot?.messages.isNullOrEmpty())OutlinedButton(onClick={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},enabled=!state.busy,
+        if(!typing&&snapshot?.messages.isNullOrEmpty())OutlinedButton(onClick={onPlan()},enabled=!state.busy,
             border=BorderStroke(1.dp,palette.primaryBorder),modifier=Modifier.testTag("assistant_plan_month")){
             Text("Planejar meu mês",color=palette.textPrimary)
         }
@@ -86,12 +124,12 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
                 val bitmap=remember(p.file.path){BitmapFactory.decodeFile(p.file.path,BitmapFactory.Options().apply{inSampleSize=4})?.asImageBitmap()}
                 Column(horizontalAlignment=Alignment.CenterHorizontally){
                     bitmap?.let { Image(it,contentDescription="Foto selecionada",modifier=Modifier.size(58.dp).clip(RoundedCornerShape(8.dp)),contentScale=ContentScale.Crop) }
-                    TextButton(onClick={vm.remove(p.id)},enabled=!state.busy&&!state.retryPending,contentPadding=PaddingValues(0.dp)){Text("Remover",fontSize=11.sp,color=palette.textSecondary)}
+                    TextButton(onClick={onRemove(p.id)},enabled=!state.busy&&!state.retryPending,contentPadding=PaddingValues(0.dp)){Text("Remover",fontSize=11.sp,color=palette.textSecondary)}
                 }
             }
         }
         snapshot?.draft?.let { draft ->
-            OutlinedButton(onClick={reviewing=true},enabled=!state.busy,modifier=Modifier.fillMaxWidth(),border=BorderStroke(1.dp,palette.primaryBorder)){
+            OutlinedButton(onClick={onReview()},enabled=!state.busy,modifier=Modifier.fillMaxWidth(),border=BorderStroke(1.dp,palette.primaryBorder)){
                 Text("Revisar ${draft.items.size} publicação(ões)",color=palette.primaryBorder)
             }
         }
@@ -101,22 +139,24 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
         }
         state.error?.let { Text(it,color=MaterialTheme.colorScheme.error,fontSize=13.sp) }
         if(state.error?.contains("Ative a publicação") == true)TextButton(onClick=onCalendar){Text("Abrir Calendário",color=palette.primaryBorder)}
-        if(state.retryPending&&!state.busy)TextButton(onClick=vm::continueConversation){Text("Continuar com uma nova mensagem",color=palette.primaryBorder,fontSize=12.sp)}
-        Row(Modifier.fillMaxWidth().border(1.dp,palette.panelBorder,RoundedCornerShape(18.dp)).padding(4.dp),verticalAlignment=Alignment.CenterVertically){
-            OutlinedTextField(value=state.input,onValueChange=vm::input,placeholder={Text("Escreva sua mensagem…",fontSize=13.sp)},
+        if(state.retryPending&&!state.busy)TextButton(onClick=onContinue){Text("Continuar com uma nova mensagem",color=palette.primaryBorder,fontSize=12.sp)}
+        }
+        Row(Modifier.fillMaxWidth().border(1.dp,palette.panelBorder,RoundedCornerShape(18.dp)).padding(4.dp).testTag("assistant_composer"),verticalAlignment=Alignment.CenterVertically){
+            OutlinedTextField(value=state.input,onValueChange=onInput,placeholder={Text("Escreva sua mensagem…",fontSize=13.sp)},
                 enabled=!state.busy&&!state.retryPending,modifier=Modifier.weight(1f).testTag("assistant_message"),maxLines=5,
                 colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=androidx.compose.ui.graphics.Color.Transparent,
                     unfocusedBorderColor=androidx.compose.ui.graphics.Color.Transparent,disabledBorderColor=androidx.compose.ui.graphics.Color.Transparent,
+                    focusedPlaceholderColor=palette.textSecondary,unfocusedPlaceholderColor=palette.textSecondary,cursorColor=palette.primaryBorder,
                     focusedTextColor=palette.textPrimary,unfocusedTextColor=palette.textPrimary))
-            IconButton(onClick={gallery.launch(arrayOf("image/jpeg","image/png","image/webp"))},enabled=!state.busy&&!state.retryPending&&state.attachments.size<4,
+            IconButton(onClick={onGallery()},enabled=!state.busy&&!state.retryPending&&state.attachments.size<4,
                 modifier=Modifier.size(44.dp).testTag("assistant_gallery")){
                 Icon(painterResource(R.drawable.chat_attachment),contentDescription="Escolher fotos da galeria",tint=palette.textPrimary,modifier=Modifier.size(22.dp))
             }
-            IconButton(onClick={val uri=CameraImageStore(context).createImageUri();cameraUri=uri.toString();camera.launch(uri)},
+            IconButton(onClick={onCamera()},
                 enabled=!state.busy&&!state.retryPending&&state.attachments.size<4,modifier=Modifier.size(44.dp).testTag("assistant_camera")){
                 Icon(painterResource(R.drawable.chat_camera),contentDescription="Tirar foto",tint=palette.textPrimary,modifier=Modifier.size(22.dp))
             }
-            FilledIconButton(onClick={vm.send()},enabled=!state.busy&&(state.input.isNotBlank()||state.attachments.isNotEmpty()||state.retryPending),
+            FilledIconButton(onClick={onSend()},enabled=!state.busy&&(state.input.isNotBlank()||state.attachments.isNotEmpty()||state.retryPending),
                 modifier=Modifier.size(44.dp).testTag("assistant_send"),colors=IconButtonDefaults.filledIconButtonColors(containerColor=palette.primaryBorder)){
                 Icon(painterResource(R.drawable.chat_send),contentDescription=if(state.retryPending)"Confirmar a mesma tentativa" else "Enviar mensagem",modifier=Modifier.size(22.dp))
             }
@@ -128,13 +168,6 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
         if(snapshot!=null&&snapshot.images<=0&&snapshot.videos<=0)TextButton(onClick=onPlans){Text("Ver combos",color=palette.primaryBorder)}
         if(!typing)Text("Assistente de IA · confira as informações antes de confirmar.",fontSize=11.sp,color=palette.textSecondary)
     }
-    if(reviewing&&state.snapshot?.draft!=null)AssistantReviewDialog(state.snapshot!!.draft!!,palette,state.busy,{reviewing=false}){items->
-        vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}
-    }
-    if(reporting.isNotBlank())AlertDialog(onDismissRequest={reporting=""},title={Text("Sinalizar esta resposta?")},
-        text={Text("Avise se esta resposta é inadequada ou contém informações perigosas. Ela será registrada para análise.")},
-        confirmButton={TextButton(onClick={vm.report(reporting);reporting=""}){Text("Sinalizar")}},
-        dismissButton={TextButton(onClick={reporting=""}){Text("Voltar")}})
 }
 
 @Composable

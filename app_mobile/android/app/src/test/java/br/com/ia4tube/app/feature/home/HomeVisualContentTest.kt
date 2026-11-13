@@ -22,6 +22,12 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import br.com.ia4tube.app.ui.text.UiText
 import br.com.ia4tube.app.ui.theme.IA4TubeTheme
+import br.com.ia4tube.app.feature.assistant.AssistantContent
+import br.com.ia4tube.app.feature.assistant.AssistantUiState
+import br.com.ia4tube.app.feature.assistant.AssistantSnapshot
+import br.com.ia4tube.app.feature.assistant.AssistantMessage
+import br.com.ia4tube.app.feature.assistant.AssistantAttachment
+import br.com.ia4tube.app.feature.assistant.AssistantCampaign
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -43,6 +49,39 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun actualAssistantMessagesAndComposerRemainVisibleOnSamsungSizedHome() {
+        val snapshot = AssistantSnapshot(listOf(AssistantMessage("m1","assistant","Envie suas fotos para preparar o mês da sua empresa.",emptyList())),
+            null,emptyList(),12,1,true,false,1,60,false)
+        HomeHarness(assistant=true, heightDp=784, chatState=AssistantUiState(snapshot=snapshot,loading=false,input="Planejar meu mês")).use { home ->
+            val messages=home.tag("assistant_messages").boundsInRoot
+            val composer=home.tag("assistant_composer").boundsInRoot
+            val chat=home.tag("home_assistant").boundsInRoot
+            assertTrue("Messages must have a visible scrolling area", messages.height >= 96f)
+            assertTrue("The composer must retain its touchable height", composer.height >= 96f)
+            assertTrue("The composer must remain inside the chat",composer.bottom<=chat.bottom+1)
+            assertTrue("Messages must end before the composer",messages.bottom<=composer.top+1)
+            home.assertAction("assistant_gallery","gallery")
+            home.assertAction("assistant_camera","camera")
+            home.capture("assistant102-messages-and-composer.png")
+        }
+    }
+    @Test fun actualAssistantPhotoAndStatusCannotConsumeAllMessageSpace() {
+        val photo=File.createTempFile("assistant-ui-",".png").apply {writeBytes(java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jz1sAAAAASUVORK5CYII="))}
+        try {
+            val snapshot=AssistantSnapshot(listOf(AssistantMessage("m1","assistant","Confira o planejamento antes de confirmar.",emptyList())),
+                null,listOf(AssistantCampaign("campaign","queued",0,4)),12,1,true,false,1,60,false)
+            val state=AssistantUiState(snapshot=snapshot,loading=false,input="Preparar estas fotos",attachments=listOf(AssistantAttachment("photo",photo)),error="Exemplo de aviso de conexão preservada.")
+            HomeHarness(assistant=true,heightDp=784,chatState=state).use { home ->
+                val messages=home.tag("assistant_messages").boundsInRoot
+                val composer=home.tag("assistant_composer").boundsInRoot
+                assertTrue("Attachments and notices belong in the scroll area",messages.height>=96f)
+                assertTrue("Send must remain fully visible",home.tag("assistant_send").boundsInRoot.bottom<=home.tag("home_assistant").boundsInRoot.bottom)
+                assertTrue(messages.bottom<=composer.top+1)
+                home.assertAction("assistant_send","send")
+                home.capture("assistant102-photo-and-status.png")
+            }
+        }finally{photo.delete()}
+    }
     @Test fun assistantHomePreservesInstagramCalendarAndMovesOnlySecondaryActionsToMore() {
         HomeHarness(assistant = true).use { home ->
             assertNotNull(home.findTag("home_assistant_fixture"))
@@ -261,7 +300,8 @@ class HomeVisualContentTest {
         widthDp: Int = 384,
         heightDp: Int = 832,
         fontScale: Float = 1f,
-        assistant: Boolean = false
+        assistant: Boolean = false,
+        chatState: AssistantUiState? = null
     ) : AutoCloseable {
         val events = mutableListOf<String>()
         val widthPx = widthDp * 2
@@ -292,7 +332,13 @@ class HomeVisualContentTest {
                             onLogout = { events += "logout" }, onIconHelpClick = { events += "help" },
                             onLockedFeatureClick = { events += "locked" },
                             onEditCompanyProfile = { events += "company-profile-editor" },
-                            assistantContent = if(assistant) ({ androidx.compose.material3.Text("Seu assistente", modifier = androidx.compose.ui.Modifier.then(androidx.compose.ui.Modifier.testTag("home_assistant_fixture"))) }) else null)
+                            assistantContent = if(assistant) ({
+                                if(chatState==null) androidx.compose.material3.Text("Seu assistente", modifier = androidx.compose.ui.Modifier.testTag("home_assistant_fixture"))
+                                else AssistantContent(chatState,premiumHomePalette(PremiumHomeTheme.Black),
+                                    onPosts={events+="edit"},onProfile={events+="company-profile-editor"},onPlans={events+="plans"},onCalendar={events+="calendar"},
+                                    onInput={events+="input"},onSend={events+="send"},onPlan={events+="plan"},onGallery={events+="gallery"},onCamera={events+="camera"},
+                                    onRemove={events+="remove"},onReview={events+="review"},onReport={events+="report"},onContinue={events+="continue"})
+                            }) else null)
                     }
                 }
             }
