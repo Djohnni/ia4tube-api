@@ -54,6 +54,32 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun assistantIconHeaderAndDistinctMessagesGiveConversationMostOfTheScreen() {
+        val snapshot=AssistantSnapshot(listOf(
+            AssistantMessage("u1","user","Quero preparar minhas publicações.",emptyList()),
+            AssistantMessage("m1","assistant","Envie suas fotos e eu ajudo a organizar.",emptyList())),
+            null,emptyList(),12,1,true,false,2,120,false)
+        HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
+            val instagram=home.tag("home_instagram").boundsInRoot
+            val brand=home.tag("home_brand_icon").boundsInRoot
+            val calendar=home.tag("home_calendar").boundsInRoot
+            assertTrue(instagram.right<=brand.left+1&&brand.right<=calendar.left+1)
+            assertEquals(instagram.top,brand.top,1f)
+            assertEquals(brand.top,calendar.top,1f)
+            assertEquals("",home.label(home.tag("home_assistant_icons")))
+            assertNull(home.findTag("home_brand"))
+            assertTrue("The enlarged conversation must retain at least 300dp",home.tag("assistant_messages").boundsInRoot.height>=600f)
+            val user=home.tag("assistant_bubble_user")
+            val assistant=home.tag("assistant_bubble_assistant")
+            assertTrue(home.label(user).startsWith("Você "))
+            assertTrue(home.label(assistant).startsWith("iA4tube "))
+            assertTrue("Customer messages align to the right of assistant messages",user.positionInRoot.x>assistant.positionInRoot.x)
+            home.assertAction("home_instagram","instagram")
+            home.assertAction("home_brand_icon","edit")
+            home.assertAction("home_calendar","calendar")
+            home.capture("assistant104-header-and-messages.png")
+        }
+    }
     @Test fun actualAssistantMessagesAndComposerRemainVisibleOnSamsungSizedHome() {
         val snapshot = AssistantSnapshot(listOf(AssistantMessage("m1","assistant","Envie suas fotos para preparar o mês da sua empresa.",emptyList())),
             null,emptyList(),12,1,true,false,1,60,false)
@@ -76,7 +102,7 @@ class HomeVisualContentTest {
         val snapshot=AssistantSnapshot(listOf(AssistantMessage("m1","assistant","Envie suas fotos pelo clipe ou pela câmera.",emptyList())),
             null,emptyList(),12,1,true,false,1,60,false)
         HomeHarness(assistant=true,heightDp=420,chatState=AssistantUiState(snapshot=snapshot,loading=false,input="Preparar meu mês")).use { home ->
-            assertNull("The header temporarily yields space while typing",home.findTag("home_instagram"))
+            assertNotNull("Compact icons remain available while typing",home.findTag("home_instagram"))
             assertNull("The footer returns after the keyboard closes",home.findTag("home_footer"))
             val messages=home.tag("assistant_messages").boundsInRoot
             val composer=home.tag("assistant_composer").boundsInRoot
@@ -84,7 +110,7 @@ class HomeVisualContentTest {
             assertTrue("The entire composer is in the resized viewport",composer.bottom<=home.tag("home_assistant").boundsInRoot.bottom)
             home.assertAction("assistant_gallery","gallery")
             home.assertAction("assistant_camera","camera")
-            home.capture("assistant103-keyboard-viewport.png")
+            home.capture("assistant104-keyboard-viewport.png")
         }
     }
     @Test fun actualAssistantPhotoAndStatusCannotConsumeAllMessageSpace() {

@@ -169,7 +169,8 @@ internal fun HomeVisualContent(
                 .padding(horizontal = 20.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (!assistantTyping) HomeMetallicHeading(palette)
+            if (assistantContent != null) HomeAssistantIconHeader(assistantTyping, onOpenInstagram, onEditVideoClick, onOpenPlannedArts)
+            else HomeMetallicHeading(palette)
             if (state.loading || state.summaryLoading) {
                 LinearProgressIndicator(Modifier.fillMaxWidth().testTag("home_loading"), color = palette.primaryBorder,
                     trackColor = palette.panelBorder.copy(alpha = 0.15f))
@@ -177,13 +178,13 @@ internal fun HomeVisualContent(
             state.error?.let { Text(it.asString(), color = MaterialTheme.colorScheme.error, fontSize = 16.sp) }
             state.summaryError?.let { Text(it.asString(), color = MaterialTheme.colorScheme.error, fontSize = 16.sp) }
 
-            if (!assistantTyping) {
+            if (assistantContent == null) {
             HomeVisualShortcut("Instagram", R.drawable.home_instagram_3d, "home_instagram", palette,
                 subtitle = "conecte seu instagram ao iA4tube", onClick = onOpenInstagram)
             HomeVisualShortcut("Calendário", R.drawable.home_calendar_3d, "home_calendar", palette,
                 accessibilityLabel = "Minhas artes planejadas", onClick = onOpenPlannedArts)
             }
-            Spacer(Modifier.height(8.dp))
+            if (assistantContent == null) Spacer(Modifier.height(8.dp))
             if (assistantContent != null) Box(Modifier.weight(1f).fillMaxWidth()) { assistantContent() } else BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 HomeVisualCreation("Posts prontos", R.drawable.home_ready_posts_3d, "home_ready_posts", palette,
                     modifier = Modifier.width((maxWidth - 12.dp) / 2), onClick = onEditVideoClick)
@@ -291,6 +292,27 @@ private fun HomeMetallicHeading(palette: PremiumHomePalette) {
             brush = Brush.verticalGradient(listOf(Color(0xFFFFEDB3), palette.primaryBorder, Color(0xFFAF711B))),
             fontWeight = FontWeight.ExtraBold, fontSize = 21.sp, letterSpacing = 2.sp,
             shadow = Shadow(Color.Black.copy(alpha = 0.7f), Offset(1f, 2f), 2f)), textAlign = TextAlign.Center)
+        }
+    }
+}
+
+@Composable
+private fun HomeAssistantIconHeader(compact: Boolean, onInstagram: () -> Unit, onPosts: () -> Unit, onCalendar: () -> Unit) {
+    val iconSize = if (compact) 48.dp else 56.dp
+    Row(Modifier.fillMaxWidth().height(if (compact) 56.dp else 64.dp).testTag("home_assistant_icons"),
+        horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+        listOf(
+            Triple(R.drawable.home_instagram_3d, "Instagram", "home_instagram"),
+            Triple(R.drawable.home_create_logo, "iA4tube: posts prontos", "home_brand_icon"),
+            Triple(R.drawable.home_calendar_3d, "Minhas artes planejadas", "home_calendar")
+        ).forEachIndexed { index, (illustration, description, tag) ->
+            val action = when (index) { 0 -> onInstagram; 1 -> onPosts; else -> onCalendar }
+            Box(Modifier.weight(1f).height(56.dp).clip(RoundedCornerShape(16.dp))
+                .clickable(role = Role.Button, onClick = action).semantics { contentDescription = description }.testTag(tag),
+                contentAlignment = Alignment.Center) {
+                Image(painterResource(illustration), contentDescription = null,
+                    contentScale = ContentScale.Fit, modifier = Modifier.size(iconSize))
+            }
         }
     }
 }

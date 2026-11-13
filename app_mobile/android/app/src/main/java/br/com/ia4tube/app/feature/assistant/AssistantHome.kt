@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -94,10 +95,6 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
     }
     Column(Modifier.fillMaxSize().border(1.dp,palette.panelBorder,RoundedCornerShape(20.dp)).padding(12.dp)
         .testTag("home_assistant"),verticalArrangement=Arrangement.spacedBy(7.dp)) {
-        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
-            Text("Seu assistente",color=palette.textPrimary,fontWeight=FontWeight.Bold,fontSize=20.sp,modifier=Modifier.weight(1f))
-            TextButton(onClick=onPosts){Text("Posts prontos ›",color=palette.primaryBorder,fontSize=13.sp)}
-        }
         val snapshot=state.snapshot
         if(state.loading)LinearProgressIndicator(Modifier.fillMaxWidth(),color=palette.primaryBorder)
         Column(Modifier.weight(1f).fillMaxWidth().testTag("assistant_messages").verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(10.dp)) {
@@ -173,8 +170,14 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
 @Composable
 private fun AssistantBubble(text:String,user:Boolean,palette:PremiumHomePalette){
     Row(Modifier.fillMaxWidth(),horizontalArrangement=if(user)Arrangement.End else Arrangement.Start){
-        Text(text,color=palette.textPrimary,fontSize=15.sp,modifier=Modifier.fillMaxWidth(.94f)
-            .clip(RoundedCornerShape(14.dp)).background(if(user)palette.primaryBorder.copy(alpha=.22f)else palette.panelBorder.copy(alpha=.24f)).padding(12.dp))
+        val foreground=if(user)Color(0xFF211706)else Color(0xFFF6F7F9)
+        Column(Modifier.fillMaxWidth(if(user).86f else .94f)
+            .clip(RoundedCornerShape(topStart=14.dp,topEnd=14.dp,bottomEnd=if(user)4.dp else 14.dp,bottomStart=if(user)14.dp else 4.dp))
+            .background(if(user)Color(0xFFE6BD59)else Color(0xFF24272E)).padding(12.dp)
+            .testTag(if(user)"assistant_bubble_user" else "assistant_bubble_assistant"),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+            Text(if(user)"Você"else"iA4tube",color=if(user)foreground else Color(0xFFFFD76A),fontSize=11.sp,fontWeight=FontWeight.Bold)
+            Text(text,color=foreground,fontSize=15.sp)
+        }
     }
 }
 
