@@ -33,6 +33,8 @@ import br.com.ia4tube.app.feature.assistant.AssistantSnapshot
 import br.com.ia4tube.app.feature.assistant.AssistantMessage
 import br.com.ia4tube.app.feature.assistant.AssistantAttachment
 import br.com.ia4tube.app.feature.assistant.AssistantCampaign
+import br.com.ia4tube.app.feature.assistant.AssistantDraft
+import br.com.ia4tube.app.feature.assistant.AssistantItem
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -75,8 +77,9 @@ class HomeVisualContentTest {
     }
     @Test fun readyReplyFitsAtMostThreeLinesOnTheSamsungWidth() {
         val reply="Preparei sua publicação. Toque em Continuar para escolher dia e hora."
+        val draft=AssistantDraft("active",1,listOf(AssistantItem("item","photo","image","Oferta","Legenda","","2099-01-17","18:00","both")))
         val snapshot=AssistantSnapshot(listOf(AssistantMessage("m","assistant",reply,emptyList())),
-            null,emptyList(),10,4,true,true,1,120,false)
+            draft,emptyList(),10,4,true,true,1,120,false)
         HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
             val node=home.nodes().first{home.label(it)==reply&&it.config.getOrNull(SemanticsActions.GetTextLayoutResult)!=null}
             val layouts=mutableListOf<TextLayoutResult>()
