@@ -12,6 +12,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsOwner
@@ -42,6 +43,19 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun assistantHomePreservesInstagramCalendarAndMovesOnlySecondaryActionsToMore() {
+        HomeHarness(assistant = true).use { home ->
+            assertNotNull(home.findTag("home_assistant_fixture"))
+            assertNull(home.findTag("home_ready_posts"))
+            assertNull(home.findTag("home_company_profile_editor"))
+            home.assertAction("home_instagram", "instagram")
+            home.assertAction("home_calendar", "calendar")
+            home.assertAction("home_footer_more", null)
+            home.assertAction("home_company_profile_editor", "company-profile-editor")
+            home.assertAction("home_footer_more", null)
+            home.assertAction("home_create_image", "monthly-planning")
+        }
+    }
     @Test fun optionalCompanyProfileIsBelowOtherFormsAndHasItsOwnUnlockedCallback() {
         HomeHarness(firstFree = true).use { home ->
             val editor = home.tag("home_company_profile_editor")
@@ -246,7 +260,8 @@ class HomeVisualContentTest {
         showLogout: Boolean = true,
         widthDp: Int = 384,
         heightDp: Int = 832,
-        fontScale: Float = 1f
+        fontScale: Float = 1f,
+        assistant: Boolean = false
     ) : AutoCloseable {
         val events = mutableListOf<String>()
         val widthPx = widthDp * 2
@@ -276,7 +291,8 @@ class HomeVisualContentTest {
                             onCompanyProfile = { events += "company-profile" }, onSupport = { events += "support" },
                             onLogout = { events += "logout" }, onIconHelpClick = { events += "help" },
                             onLockedFeatureClick = { events += "locked" },
-                            onEditCompanyProfile = { events += "company-profile-editor" })
+                            onEditCompanyProfile = { events += "company-profile-editor" },
+                            assistantContent = if(assistant) ({ androidx.compose.material3.Text("Seu assistente", modifier = androidx.compose.ui.Modifier.then(androidx.compose.ui.Modifier.testTag("home_assistant_fixture"))) }) else null)
                     }
                 }
             }

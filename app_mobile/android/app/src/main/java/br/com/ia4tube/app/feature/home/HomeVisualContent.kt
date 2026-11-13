@@ -104,7 +104,8 @@ internal fun HomeVisualContent(
     onLogout: () -> Unit,
     onIconHelpClick: () -> Unit,
     onLockedFeatureClick: () -> Unit,
-    onEditCompanyProfile: () -> Unit = {}
+    onEditCompanyProfile: () -> Unit = {},
+    assistantContent: (@Composable () -> Unit)? = null
 ) {
     val scroll = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -156,7 +157,7 @@ internal fun HomeVisualContent(
         }
     ) {
         Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).testTag("home_scroll")
+            Modifier.weight(1f).fillMaxWidth().then(if(assistantContent == null) Modifier.verticalScroll(scroll) else Modifier).testTag("home_scroll")
                 .padding(horizontal = 20.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -173,12 +174,12 @@ internal fun HomeVisualContent(
             HomeVisualShortcut("Calendário", R.drawable.home_calendar_3d, "home_calendar", palette,
                 accessibilityLabel = "Minhas artes planejadas", onClick = onOpenPlannedArts)
             Spacer(Modifier.height(8.dp))
-            BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            if (assistantContent != null) Box(Modifier.weight(1f).fillMaxWidth()) { assistantContent() } else BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 HomeVisualCreation("Posts prontos", R.drawable.home_ready_posts_3d, "home_ready_posts", palette,
                     modifier = Modifier.width((maxWidth - 12.dp) / 2), onClick = onEditVideoClick)
             }
             Spacer(Modifier.height(4.dp))
-            Row(
+            if (assistantContent == null) Row(
                 Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(14.dp))
                     .clickable(role = Role.Button) { otherForms = !otherForms }.testTag("home_other_forms")
                     .padding(horizontal = 10.dp, vertical = 12.dp),
@@ -190,7 +191,7 @@ internal fun HomeVisualContent(
                     contentDescription = if (otherForms) "Recolher outras formas" else "Expandir outras formas",
                     tint = palette.primaryBorder, modifier = Modifier.size(28.dp))
             }
-            if (otherForms) {
+            if (otherForms && assistantContent == null) {
                 HomeVisualMenuAction("Criar imagens", "home_create_image", palette,
                     onClick = onMonthlyPlanningClick)
                 HomeVisualMenuAction("Várias fotos", "home_multiple_photos", palette, firstFreeArtMode,
@@ -200,7 +201,7 @@ internal fun HomeVisualContent(
                 HomeVisualMenuAction("Post Deslizante", "home_carousel", palette, firstFreeArtMode,
                     description = state.carrosseisRestantes?.let { "$it disponíveis" }, onClick = lockable(onCarouselClick))
             }
-            Text("Perfil da empresa", color = palette.textPrimary, fontSize = 16.sp,
+            if (assistantContent == null) Text("Perfil da empresa", color = palette.textPrimary, fontSize = 16.sp,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                     .clickable(role = Role.Button, onClick = onEditCompanyProfile)
                     .padding(horizontal = 10.dp, vertical = 12.dp).testTag("home_company_profile_editor"))
@@ -224,6 +225,15 @@ internal fun HomeVisualContent(
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)
                 .testTag("home_more_sheet"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Mais", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                if (assistantContent != null) {
+                    Text("Outras formas de criar", color = palette.textSecondary, fontSize = 16.sp)
+                    HomeVisualMenuAction("Criar imagens", "home_create_image", palette, onClick = dismissAndRun(onMonthlyPlanningClick))
+                    HomeVisualMenuAction("Várias fotos", "home_multiple_photos", palette, firstFreeArtMode, onClick = lockable(dismissAndRun(onCreateArtEmpresa)))
+                    HomeVisualMenuAction("Mat. Impresso", "home_printed_materials", palette, firstFreeArtMode, onClick = lockable(dismissAndRun(onCompanyProfile)))
+                    HomeVisualMenuAction("Post Deslizante", "home_carousel", palette, firstFreeArtMode, onClick = lockable(dismissAndRun(onCarouselClick)))
+                    HomeVisualMenuAction("Perfil da empresa", "home_company_profile_editor", palette, onClick = dismissAndRun(onEditCompanyProfile))
+                    HorizontalDivider(color = palette.panelBorder)
+                }
                 HomeVisualMenuAction("Pedidos", "home_orders", palette, firstFreeArtMode,
                     description = if (state.summaryLoading) "Consultando seus pedidos…"
                     else "${state.emProducao} em produção · ${state.artesProntas} prontas",

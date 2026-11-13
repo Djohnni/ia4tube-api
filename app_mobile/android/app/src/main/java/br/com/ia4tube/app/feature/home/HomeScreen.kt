@@ -104,7 +104,8 @@ fun HomeScreen(
     isLoggedIn: Boolean = true,
     cameraRequestKey: Int = 0,
     onCameraAuthRequired: () -> Unit = {},
-    onEditCompanyProfile: () -> Unit = {}
+    onEditCompanyProfile: () -> Unit = {},
+    assistantTokenProvider: () -> String = { "" }
 ) {
     val state by viewModel.uiState.collectAsState()
     val homePalette = premiumHomePalette(premiumTheme)
@@ -175,7 +176,11 @@ fun HomeScreen(
         onIconHelpClick = { showIconHelpDialog = true },
         onLockedFeatureClick = {
             Toast.makeText(context, "Entre na sua conta para acessar esta função.", Toast.LENGTH_SHORT).show()
-        }
+        },
+        assistantContent = if (br.com.ia4tube.app.BuildConfig.ASSISTANT_HOME_ENABLED && isLoggedIn && assistantTokenProvider().isNotBlank()) {
+            { br.com.ia4tube.app.feature.assistant.AssistantHome(homePalette, assistantTokenProvider,
+                onEditVideoClick, onEditCompanyProfile, onOpenPlans, onOpenPlannedArts) }
+        } else null
     )
 
     if (showPhotoSourceDialog) {
