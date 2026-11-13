@@ -66,11 +66,11 @@ function conciseReply(value, itemCount = 0) {
 const scheduleConfirmation = value => /^(sim|confirmo|confirmar|pode fazer|pode criar|pode continuar|continuar|ok)[.!\s]*$/i.test(value);
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
-  clock = Date.now, enabled = true, pilots = [], submitFetch = globalThis.fetch, dispatchSpacingMs = 4500 }) {
+  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500 }) {
   const busy = new Set(), rates = new Map(); let stopped = false, timer = null, running = false;
   function account(claims) {
     const owner = claims?.whatsapp;
-    if (!enabled || pilots.length && !pilots.includes(owner)) fail("unavailable", 403);
+    if (!enabled) fail("unavailable", 403);
     if (typeof owner !== "string" || !owner || owner !== claims?.company_id || claims.token_version !== 2 || readClient(owner)?.ativo !== true) fail("session_required", 401);
     return owner;
   }
