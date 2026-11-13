@@ -38,13 +38,17 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class GoogleAuthVisualTest {
-    private val previousPause = ShadowChoreographer.isPaused()
-    private val previousDelay = ShadowChoreographer.getFrameDelay()
+    private var previousPause = false
+    private var previousDelay = Duration.ZERO
     @Before fun pauseFrames() {
+        previousPause = ShadowChoreographer.isPaused()
+        previousDelay = ShadowChoreographer.getFrameDelay()
         ShadowChoreographer.setPaused(true)
         ShadowChoreographer.setFrameDelay(Duration.ofMillis(16))
     }
     @After fun restoreFrames() {
+        Snapshot.sendApplyNotifications()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(32))
         ShadowChoreographer.setPaused(previousPause)
         ShadowChoreographer.setFrameDelay(previousDelay)
     }
@@ -71,7 +75,11 @@ class GoogleAuthVisualTest {
                 assertEquals("", repository.getSavedToken())
                 assertEquals(0, navigationCalls)
                 capture(activity, if (register) "google109-cadastro.png" else "google109-login.png")
-            } finally { controller.pause().stop().destroy() }
+            } finally {
+                controller.pause().stop().destroy()
+                Snapshot.sendApplyNotifications()
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(32))
+            }
         }
     }
 
@@ -91,7 +99,11 @@ class GoogleAuthVisualTest {
             assertFalse(button().config.contains(SemanticsProperties.Disabled))
             assertTrue(button().config[SemanticsActions.OnClick].action!!.invoke())
             assertEquals(1, clicks)
-        } finally { controller.pause().stop().destroy() }
+        } finally {
+            controller.pause().stop().destroy()
+            Snapshot.sendApplyNotifications()
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(32))
+        }
     }
 
     private fun settle(activity: ComponentActivity) {

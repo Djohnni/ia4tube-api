@@ -180,6 +180,9 @@ if (localUiResourceTests) {
     tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
         if (name == "testDebugUnitTest") {
             dependsOn(makeUiFixture)
+            // Local native-renderer/frame-clock fixtures must not leak between test classes.
+            // This property applies only to this explicit local test mode, never app execution.
+            forkEvery = 1
             systemProperty("ia4tube.localUiResources", "true")
             inputs.property("ia4tubeLocalUiResources", true)
             inputs.dir(fixtureDir)
