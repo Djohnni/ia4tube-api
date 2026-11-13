@@ -78,7 +78,7 @@ internal class AssistantClient {
         if(result.optJSONObject("profile")?.optBoolean("has_logo")!=true)throw AssistantException("assistant_logo_required")
     }
     suspend fun confirm(token:String,draft:AssistantDraft,items:List<AssistantItem>):String {
-        val rows=JSONArray();items.forEach { rows.put(JSONObject().put("id",it.id).put("date",it.date).put("time",it.time).put("destination",it.destination).put("kind",it.kind)) }
+        val rows=JSONArray();items.forEach { rows.put(JSONObject().put("id",it.id).put("date",it.date).put("time",it.time).put("destination",it.destination).put("kind",it.kind).put("imageText",it.imageText)) }
         return execute(request(token,"/confirm",json(JSONObject().put("draftId",draft.id).put("version",draft.version).put("confirmed",true).put("items",rows)))).getString("campaignId")
     }
     suspend fun photo(token:String,id:String)=withContext(Dispatchers.IO) {

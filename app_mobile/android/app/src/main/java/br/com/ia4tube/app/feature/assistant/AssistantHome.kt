@@ -30,6 +30,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -70,18 +72,17 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
     val gallery=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()){uris->vm.attachAll(uris.take(4-state.attachments.size))}
     val logo=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->uri?.let(vm::saveLogo)}
     AssistantContent(state,palette,onPosts,onProfile,onPlans,onCalendar,
-        onInput=vm::input,onSend={if(assistantScheduleRequested(state)){vm.input("");reviewing=true}else vm.send()},onPlan={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},
+        onInput=vm::input,onSend={if(assistantScheduleRequested(state)){vm.input("");vm.reviewRequested()}else vm.send()},onPlan={vm.send("Quero ajuda para preparar o mês do meu Instagram.")},
         onGallery={gallery.launch(arrayOf("image/jpeg","image/png","image/webp"))},
         onCamera={val uri=CameraImageStore(context).createImageUri();cameraUri=uri.toString();camera.launch(uri)},
-        onRemove=vm::remove,onReview={reviewing=true},onReport={reporting=it},onContinue=vm::continueConversation)
+        onRemove=vm::remove,onReview={state.snapshot?.draft?.let { draft ->
+            if(state.snapshot?.hasLogo==true)vm.confirm(draft,draft.items){reviewing=false}else reviewing=true
+        }},onReport={reporting=it},onContinue=vm::continueConversation,onEditItem=vm::editItem,loadPhoto=vm::photoBytes)
 
     if(reviewing&&state.snapshot?.draft!=null) {
         if(!state.snapshot!!.hasLogo)AssistantLogoDialog(state.busy,state.error,{reviewing=false}){
             logo.launch(arrayOf("image/jpeg","image/png","image/webp"))
-        } else AssistantScheduleFlow(state.snapshot!!.draft!!,state.snapshot!!.businessType,state.busy,state.error,{reviewing=false},
-            imageBalance=state.snapshot!!.images,videoBalance=state.snapshot!!.videos){items->
-            vm.confirm(state.snapshot!!.draft!!,items){reviewing=false}
-        }
+        } else LaunchedEffect(Unit){reviewing=false}
     }
     if(reporting.isNotBlank())AlertDialog(onDismissRequest={reporting=""},title={Text("Sinalizar esta resposta?")},
         text={Text("Avise se esta resposta é inadequada ou contém informações perigosas. Ela será registrada para análise.")},
@@ -93,11 +94,13 @@ internal fun AssistantHome(palette:PremiumHomePalette,token:()->String,onPosts:(
 internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
     onPosts:()->Unit,onProfile:()->Unit,onPlans:()->Unit,onCalendar:()->Unit,
     onInput:(String)->Unit,onSend:()->Unit,onPlan:()->Unit,onGallery:()->Unit,onCamera:()->Unit,
-    onRemove:(String)->Unit,onReview:()->Unit,onReport:(String)->Unit,onContinue:()->Unit) {
+    onRemove:(String)->Unit,onReview:()->Unit,onReport:(String)->Unit,onContinue:()->Unit,
+    onEditItem:(AssistantItem)->Unit={},loadPhoto:suspend(String)->ByteArray?={null}) {
     val scroll=rememberScrollState()
-    LaunchedEffect(state.snapshot?.messages?.size,state.snapshot?.campaigns?.map{it.id to it.status},state.attachments.size,state.busy,state.error){
+    var draftTop by remember { mutableIntStateOf(0) }
+    LaunchedEffect(state.snapshot?.messages?.size,state.snapshot?.draft?.id,state.snapshot?.campaigns?.map{it.id to it.status},state.attachments.size,state.busy,state.error){
         if(!state.snapshot?.messages.isNullOrEmpty() || state.attachments.isNotEmpty() || state.busy || state.error!=null){
-            withFrameNanos { };scroll.animateScrollTo(scroll.maxValue)
+            withFrameNanos { };scroll.animateScrollTo(if(state.snapshot?.draft!=null&&!state.busy)draftTop.coerceIn(0,scroll.maxValue)else scroll.maxValue)
         }
     }
     Column(Modifier.fillMaxSize()
@@ -125,8 +128,13 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
             }
         }
         snapshot?.draft?.let { draft ->
-            OutlinedButton(onClick={onReview()},enabled=!state.busy,modifier=Modifier.fillMaxWidth(),border=BorderStroke(1.dp,palette.primaryBorder)){
+            Column(Modifier.fillMaxWidth().onGloballyPositioned{draftTop=it.positionInParent().y.toInt()},verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            AssistantInlineItems(draft,palette,state.busy||state.retryPending,onEditItem,loadPhoto)
+            val enough=draft.items.count{it.kind=="image"}<=snapshot.images&&draft.items.count{it.kind=="video"}<=snapshot.videos
+            if(!enough)Text("Seu saldo não permite essa quantidade nesse formato.",color=palette.textSecondary,fontSize=12.sp)
+            OutlinedButton(onClick={onReview()},enabled=!state.busy&&!state.retryPending&&enough&&draft.items.all(::assistantItemReady),modifier=Modifier.fillMaxWidth().testTag("assistant_confirm_items"),border=BorderStroke(1.dp,palette.primaryBorder)){
                 Text("Continuar",color=palette.primaryBorder)
+            }
             }
         }
         snapshot?.campaigns?.lastOrNull()?.takeIf { c -> c.afterMessageId.isBlank()||snapshot.messages.none{it.id==c.afterMessageId} }
@@ -165,7 +173,7 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
 internal fun assistantDisplayText(message:AssistantMessage,snapshot:AssistantSnapshot):String? {
     if(message.role!="assistant")return message.text
     val active=snapshot.draft!=null&&message.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id
-    if(active)return message.text
+    if(active)return message.text.replace(Regex("Toque em Continuar[^\\n]*",RegexOption.IGNORE_CASE),"Confira as opções abaixo de cada foto.")
     // A historical proposal must not tell the customer to press a button that no longer exists.
     return message.text.replace(Regex("\\s*Toque em Continuar[^\\n]*",RegexOption.IGNORE_CASE),"").trim().takeIf{it.isNotBlank()}
 }

@@ -37,7 +37,24 @@ class AssistantContractTest {
         val message=AssistantMessage("proposal","assistant","Preparei sua publicação. Toque em Continuar para escolher dia e hora.",emptyList())
         val snapshot=AssistantSnapshot(listOf(message),null,listOf(AssistantCampaign("c","sent",1,1,"proposal")),10,4,true,true,2,120,false)
         assertEquals("Preparei sua publicação.",assistantDisplayText(message,snapshot))
-        assertEquals(message.text,assistantDisplayText(message,snapshot.copy(draft=draft())))
+        assertEquals("Preparei sua publicação. Confira as opções abaixo de cada foto.",assistantDisplayText(message,snapshot.copy(draft=draft())))
+    }
+    @Test fun photoChoicesSurviveRestorationAndNeverMoveToAnotherItemOrRevision() {
+        val original=draft().copy(items=draft().items+draft().items.single().copy(id="second",photoId="other",imageText="Outro produto"))
+        val edited=original.copy(items=original.items.map{if(it.id=="second")it.copy(kind="video",imageText="R$ 49,90",time="19:02",destination="story")else it})
+        val restored=assistantRestoreEdits(original,assistantSaveEdits(edited))
+        assertEquals(edited,restored);assertEquals(original.items.first(),restored.items.first())
+        assertEquals("other",restored.items.last().photoId)
+        assertEquals(original.copy(version=3),assistantRestoreEdits(original.copy(version=3),assistantSaveEdits(edited)))
+        assertEquals(original.copy(id="different"),assistantRestoreEdits(original.copy(id="different"),assistantSaveEdits(edited)))
+        assertEquals(original,assistantRestoreEdits(original,assistantSaveEdits(edited).put("items",org.json.JSONArray())))
+    }
+    @Test fun destinationChoicesAlwaysKeepAtLeastOneAndSchedulesMustBeFuture() {
+        assertEquals("feed",assistantToggleDestination("both",true));assertEquals("story",assistantToggleDestination("both",false))
+        assertEquals("story",assistantToggleDestination("story",true));assertEquals("feed",assistantToggleDestination("feed",false))
+        assertEquals("both",assistantToggleDestination("feed",true));assertEquals("both",assistantToggleDestination("story",false))
+        assertTrue(assistantItemReady(draft().items.single()));assertFalse(assistantItemReady(draft().items.single().copy(date="")))
+        assertFalse(assistantItemReady(draft().items.single().copy(date="2000-01-01")))
     }
     @Test fun preservedDraftAndCampaignAreDifferentFromACompletedPublication() {
         val state=parseAssistantSnapshot(JSONObject("""{"ok":true,"messages":[{"id":"m","role":"assistant","text":"Confira o pedido","photoIds":[]}],

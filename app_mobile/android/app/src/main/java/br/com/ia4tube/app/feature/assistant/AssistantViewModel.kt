@@ -36,6 +36,7 @@ internal class AssistantViewModel(private val context:Context,private val curren
     private val client=AssistantClient()
     private val directory=File(context.filesDir,"assistant/"+MessageDigest.getInstance("SHA-256").digest(owner.toByteArray()).joinToString(""){"%02x".format(it)})
     private val mutable=MutableStateFlow(AssistantUiState())
+    private val previews=linkedMapOf<String,ByteArray>()
     val state=mutable.asStateFlow()
     private fun token():String { val t=currentToken();if(owner.isBlank()||authenticatedAccountFromJwt(t)!=owner)throw AssistantException("assistant_session_required");return t }
     private fun saveJson(file:File,value:String){
@@ -60,10 +61,29 @@ internal class AssistantViewModel(private val context:Context,private val curren
     }
     fun input(value:String) { if(!mutable.value.retryPending)mutable.update { it.copy(input=value.take(2000)) } }
     suspend fun refresh() {
-        try { val t=token();val result=client.state(t);token();mutable.update { it.copy(snapshot=result,loading=false,error=null) } }
+        try { val t=token();val result=client.state(t);token();mutable.update { it.copy(snapshot=restoreEdits(result),loading=false,error=null) } }
         catch(e:Exception){mutable.update{it.copy(loading=false,error=errorText(e))}}
     }
     fun reload(){viewModelScope.launch{refresh()}}
+    private fun restoreEdits(snapshot:AssistantSnapshot):AssistantSnapshot {
+        val draft=snapshot.draft?:return snapshot
+        val file=File(directory,"draft-edits.json")
+        val restored=runCatching { if(file.isFile)assistantRestoreEdits(draft,JSONObject(file.readText()))else draft }.getOrDefault(draft)
+        return snapshot.copy(draft=restored)
+    }
+    fun editItem(item:AssistantItem) {
+        if(mutable.value.busy||mutable.value.retryPending)return
+        val before=mutable.value.snapshot?:return
+        val draft=before.draft?:return
+        val original=draft.items.find{it.id==item.id}?:return
+        if(item.kind !in setOf("image","video")||item.destination !in setOf("feed","story","both"))return
+        val changed=original.copy(kind=item.kind,imageText=item.imageText.take(300),date=item.date,time=item.time,destination=item.destination)
+        val next=draft.copy(items=draft.items.map{if(it.id==changed.id)changed else it})
+        try { directory.mkdirs();saveJson(File(directory,"draft-edits.json"),assistantSaveEdits(next).toString())
+            mutable.update { it.copy(snapshot=before.copy(draft=next),error=null) }
+        }catch(_:Exception){mutable.update{it.copy(error="Não consegui salvar essa escolha. Tente novamente.")}}
+    }
+    fun reviewRequested(){mutable.update{it.copy(error="Confira as opções de cada foto e toque em Continuar.")}}
     fun saveLogo(uri:Uri) {
         if(mutable.value.busy)return
         viewModelScope.launch {
@@ -118,12 +138,15 @@ internal class AssistantViewModel(private val context:Context,private val curren
                 mutable.update { it.copy(retryPending=true) }
                 for(p in before.attachments){client.upload(t,p.id,p.file);token()}
                 val ids=attempt.getJSONArray("photoIds");val result=client.message(t,attempt.getString("id"),attempt.getString("message"),(0 until ids.length()).map{ids.getString(it)})
-                token();pending.delete();mutable.update { it.copy(snapshot=result,input="",attachments=emptyList(),retryPending=false) };persistAttachments()
+                token();pending.delete();mutable.update { it.copy(snapshot=restoreEdits(result),input="",attachments=emptyList(),retryPending=false) };persistAttachments()
             }catch(e:Exception){mutable.update { it.copy(error=errorText(e)) }}finally{mutable.update { it.copy(busy=false) }}
         }
     }
     fun confirm(draft:AssistantDraft,items:List<AssistantItem>,onConfirmed:()->Unit) {
         if(mutable.value.busy)return
+        if(items.isEmpty()||items.any{!assistantItemReady(it)}){
+            mutable.update{it.copy(error="Escolha dia e horário futuros para cada foto.")};return
+        }
         viewModelScope.launch {
             mutable.update { it.copy(busy=true,error=null) }
             try {
@@ -142,7 +165,17 @@ internal class AssistantViewModel(private val context:Context,private val curren
             }catch(e:Exception){mutable.update { it.copy(error=errorText(e)) }}finally{mutable.update { it.copy(busy=false) }}
         }
     }
-    suspend fun photoBytes(id:String)=client.photo(token(),id)
+    suspend fun photoBytes(id:String):ByteArray?=withContext(Dispatchers.IO){
+        token();synchronized(previews){previews[id]}?.let{return@withContext it}
+        val bytes=client.photo(token(),id);token()
+        val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true};BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
+        var sample=1;while(maxOf(bounds.outWidth,bounds.outHeight)/sample>640)sample*=2
+        val bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply{inSampleSize=sample})?:return@withContext null
+        val output=ByteArrayOutputStream();bitmap.compress(Bitmap.CompressFormat.JPEG,80,output);bitmap.recycle()
+        val preview=output.toByteArray();token()
+        synchronized(previews){previews[id]=preview;while(previews.size>8)previews.remove(previews.keys.first())}
+        preview
+    }
     private fun normalize(uri:Uri):AssistantAttachment {
         directory.mkdirs();val id=UUID.randomUUID().toString();val raw=File(directory,"$id-source.tmp")
         try {

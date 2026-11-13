@@ -56,6 +56,30 @@ import java.time.Duration
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class HomeVisualContentTest {
+    @Test fun eachChatPhotoHasItsOwnCompactChoicesWithoutTheSequentialDialog() {
+        val first=AssistantItem("first","photo-a","image","Oferta","Legenda A","R$ 29,90","2099-01-17","18:11","both")
+        val second=first.copy(id="second",photoId="photo-b",caption="Legenda B",imageText="R$ 49,90",date="2099-01-18",time="19:22")
+        val snapshot=AssistantSnapshot(listOf(AssistantMessage("m","assistant","Preparei 2 publicações.",emptyList())),
+            AssistantDraft("draft",1,listOf(first,second)),emptyList(),20,15,true,true,2,120,false)
+        HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
+            for(id in listOf("first","second")) {
+                val photo=home.tag("assistant_item_$id")
+                for(field in listOf("text","date","time","feed","story","image","video")) {
+                    val control=home.tag("assistant_item_${field}_$id")
+                    assertTrue(control.positionInRoot.y>=photo.positionInRoot.y)
+                    home.assertTextFits(control)
+                }
+            }
+            home.assertAction("assistant_item_video_first","edit:first")
+            assertEquals("video",home.chatItem("first")?.kind)
+            assertEquals("image",home.chatItem("second")?.kind)
+            assertEquals("Reels",home.label(home.tag("assistant_item_feed_first")))
+            assertEquals("R$ 49,90",home.chatItem("second")?.imageText)
+            assertTrue(home.nodes().none{home.label(it)=="Que dia e hora você quer que seja publicado?"})
+            home.capture("assistant107-inline-photos.png")
+            home.assertAction("assistant_confirm_items","review")
+        }
+    }
     @Test fun receivedRequestHasItsOwnVisibleBoundaryBeforeTheNextConversation() {
         val proposal=AssistantMessage("proposal","assistant","Preparei sua publicação. Toque em Continuar para escolher dia e hora.",emptyList())
         val snapshot=AssistantSnapshot(listOf(proposal,AssistantMessage("next","user","Quero fazer outra publicação.",emptyList())),
@@ -81,7 +105,7 @@ class HomeVisualContentTest {
         val snapshot=AssistantSnapshot(listOf(AssistantMessage("m","assistant",reply,emptyList())),
             draft,emptyList(),10,4,true,true,1,120,false)
         HomeHarness(assistant=true,heightDp=784,chatState=AssistantUiState(snapshot=snapshot,loading=false)).use { home ->
-            val node=home.nodes().first{home.label(it)==reply&&it.config.getOrNull(SemanticsActions.GetTextLayoutResult)!=null}
+            val node=home.nodes().first{home.label(it)=="Preparei sua publicação. Confira as opções abaixo de cada foto."&&it.config.getOrNull(SemanticsActions.GetTextLayoutResult)!=null}
             val layouts=mutableListOf<TextLayoutResult>()
             assertTrue(node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts))
             assertTrue(layouts.isNotEmpty());assertTrue(layouts.all{it.lineCount<=3&&!it.hasVisualOverflow})
@@ -395,6 +419,7 @@ class HomeVisualContentTest {
         val widthPx = widthDp * 2
         private val heightPx = heightDp * 2
         private val state = mutableStateOf(initial)
+        private val assistantState=mutableStateOf(chatState)
         private val controller = Robolectric.buildActivity(ComponentActivity::class.java)
         private val activity = controller.get()
         private val main = shadowOf(Looper.getMainLooper())
@@ -426,10 +451,12 @@ class HomeVisualContentTest {
                             onEditCompanyProfile = { events += "company-profile-editor" },
                             assistantContent = if(assistant) ({
                                 if(chatState==null) androidx.compose.material3.Text("Seu assistente", modifier = androidx.compose.ui.Modifier.testTag("home_assistant_fixture"))
-                                else AssistantContent(chatState,premiumHomePalette(PremiumHomeTheme.Black),
+                                else AssistantContent(assistantState.value!!,premiumHomePalette(PremiumHomeTheme.Black),
                                     onPosts={events+="edit"},onProfile={events+="company-profile-editor"},onPlans={events+="plans"},onCalendar={events+="calendar"},
                                     onInput={events+="input"},onSend={events+="send"},onPlan={events+="plan"},onGallery={events+="gallery"},onCamera={events+="camera"},
-                                    onRemove={events+="remove"},onReview={events+="review"},onReport={events+="report"},onContinue={events+="continue"})
+                                    onRemove={events+="remove"},onReview={events+="review"},onReport={events+="report"},onContinue={events+="continue"},
+                                    onEditItem={changed->events+="edit:${changed.id}";val before=assistantState.value!!;val snapshot=before.snapshot!!
+                                        assistantState.value=before.copy(snapshot=snapshot.copy(draft=snapshot.draft!!.copy(items=snapshot.draft.items.map{if(it.id==changed.id)changed else it})))})
                             }) else null)
                         }
                         }
@@ -440,6 +467,7 @@ class HomeVisualContentTest {
         }
 
         fun update(value: HomeUiState) { state.value = value; settle() }
+        fun chatItem(id:String)=assistantState.value?.snapshot?.draft?.items?.find{it.id==id}
 
         fun assertAction(tagName: String, expected: String?) {
             events.clear()
