@@ -305,6 +305,18 @@ function readClientes() {
   return JSON.parse((fs.readFileSync(CLIENTES_FILE, "utf8") || "{}").replace(/^\uFEFF/, ""));
 }
 
+// One explicitly configured administrative courtesy at startup; never accepts HTTP input.
+// An immutable account receipt prevents a subsequent restart from refilling credits.
+if (process.env.IA4TUBE_STARTUP_COURTESY) {
+  try {
+    const result = require("./src/maintenance/one-time-plan-courtesy").runStartupCourtesy({
+      requestJson: process.env.IA4TUBE_STARTUP_COURTESY, dataDir: DATA_DIR,
+      readClients: readClientes, writeClients: value => atomicWriteJson(CLIENTES_FILE, value)
+    });
+    console.log("ONE_TIME_PLAN_COURTESY", JSON.stringify(result));
+  } catch (error) { console.error("ONE_TIME_PLAN_COURTESY", JSON.stringify({status:"not_applied",code:error.code||"courtesy_failed"})); }
+}
+
 function writeClientes(obj) {
   fs.writeFileSync(CLIENTES_FILE, JSON.stringify(obj, null, 2), "utf8");
 }

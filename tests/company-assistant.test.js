@@ -88,6 +88,30 @@ for(const issue of ["submitFailure","badReceipt"])test(`${issue}: no automatic r
   const f=await fixture(t,{[issue]:true}),s=await draft(f);await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
   assert.equal((await f.service.state(claims())).campaigns[0].status,"needs_attention");await f.service.processPending();assert.equal(f.submissions.length,1);
 });
+test("each confirmed photo keeps its own text, format and schedule without duplicate dispatch",async t=>{
+  const f=await fixture(t),first=uuid(),second=uuid();
+  await f.service.upload(claims(),first,f.png,"primeira.png");await f.service.upload(claims(),second,f.png,"segunda.png");
+  f.setOutput({reply:"Preparei duas publicações.",photoDescriptions:[],items:[first,second].map(photoId=>({photoId,kind:"image",title:"Oferta",caption:"Legenda original",imageText:"Antes",segment:"Comércio",date:null,time:null,destination:"both"}))});
+  const s=await f.service.message(claims(),{requestId:uuid(),message:"Prepare as duas fotos",photoIds:[first,second]});
+  const body=confirmation(s);body.items[0]={...body.items[0],date:"2099-01-17",time:"18:11",destination:"feed",kind:"image",imageText:"R$ 29,90"};
+  body.items[1]={...body.items[1],date:"2099-01-18",time:"19:22",destination:"story",kind:"video",imageText:"Promoção só hoje"};
+  const c=await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();
+  assert.equal((await f.service.confirm(claims(),body)).campaignId,c.campaignId);
+  assert.equal(f.submissions.length,2);assert.deepEqual(f.submissions.map(v=>[v.data.mediaKind,v.data.imageText]),[["image","R$ 29,90"],["video","Promoção só hoje"]]);
+  assert.deepEqual(f.contextCalls.map(v=>[v.date,v.time,v.destination]),[["2099-01-17","18:11","feed"],["2099-01-18","19:22","story"]]);
+  assert(f.submissions.every(v=>v.data.imageCaption==="Legenda original"));
+  await assert.rejects(f.service.confirm(claims(),{...body,items:body.items.map(i=>({...i,imageText:"Alterado depois"}))}),{code:"assistant_request_conflict"});
+});
+test("unbounded or malformed image information is rejected before calendar admission",async t=>{
+  const f=await fixture(t),s=await draft(f);
+  for(const imageText of ["x".repeat(301),null,{},"\u0000"]){
+    const body=confirmation(s);body.items[0].imageText=imageText;
+    await assert.rejects(f.service.confirm(claims(),body),{code:"assistant_input_invalid"});
+  }
+  assert.equal(f.contextCalls.length,0);assert.equal(f.submissions.length,0);
+  const body=confirmation(s);body.items[0].imageText="";await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();
+  assert.equal(f.submissions[0].data.imageText,undefined);
+});
 test("expired date is refused before any order or provider generation",async t=>{
   const f=await fixture(t),s=await draft(f),body=confirmation(s);body.items[0].date="2099-01-15";
   await assert.rejects(f.service.confirm(claims(),body),{code:"assistant_schedule_invalid"});assert.equal(f.submissions.length,0);
