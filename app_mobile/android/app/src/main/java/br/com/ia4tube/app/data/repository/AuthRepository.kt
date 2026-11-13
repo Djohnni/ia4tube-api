@@ -49,7 +49,8 @@ class AuthRepository(
     private val apiClient: IA4TubeApiClient,
     private val sessionStore: SessionStore,
     private val fcmTokenRegistrar: FcmTokenRegistrar? = null,
-    private val companyProfileStore: CompanyProfileStore? = null
+    private val companyProfileStore: CompanyProfileStore? = null,
+    private val onGoogleSignOut: (suspend () -> Unit)? = null
 ) {
     init {
         companyProfileStore?.prepareForAuthenticatedAccount(
@@ -58,6 +59,26 @@ class AuthRepository(
     }
 
     fun getSavedToken(): String = sessionStore.getToken()
+
+    private val googleAuthApi = br.com.ia4tube.app.data.api.GoogleAuthApiClient()
+
+    suspend fun googleClientId(): ApiResult<String> = googleAuthApi.clientId()
+
+    suspend fun loginWithGoogle(idToken: String): ApiResult<LoginResponse> {
+        return when (val result = googleAuthApi.signIn(idToken)) {
+            is ApiResult.Success -> {
+                val owner = authenticatedAccountFromJwt(result.value.token)
+                if (!owner.startsWith("google_") || owner.length <= 7)
+                    return ApiResult.Failure("Não foi possível confirmar sua entrada com Google.")
+                companyProfileStore?.prepareForAuthenticatedAccount(owner)
+                runCatching { fcmTokenRegistrar?.prepareForAccountChange(result.value.token) }
+                sessionStore.saveToken(result.value.token)
+                runCatching { fcmTokenRegistrar?.syncCurrentTokenNow() }
+                result
+            }
+            is ApiResult.Failure -> result
+        }
+    }
 
     suspend fun login(login: String, senha: String): ApiResult<LoginResponse> {
         return when (val result = apiClient.login(login, senha)) {
@@ -257,6 +278,7 @@ class AuthRepository(
             fcmTokenRegistrar?.deactivateForLogout()
         }
         sessionStore.clear()
+        runCatching { kotlinx.coroutines.withTimeoutOrNull(2000) { onGoogleSignOut?.invoke() } }
     }
 
     private companion object {

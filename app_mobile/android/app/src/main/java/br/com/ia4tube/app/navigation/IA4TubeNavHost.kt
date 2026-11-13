@@ -179,7 +179,8 @@ fun IA4TubeNavHost(
             apiClient = apiClient,
             sessionStore = sessionStore,
             fcmTokenRegistrar = fcmTokenRegistrar,
-            companyProfileStore = companyProfileStore
+            companyProfileStore = companyProfileStore,
+            onGoogleSignOut = { br.com.ia4tube.app.feature.auth.clearGoogleSignInState(context) }
         )
     }
     val graphicMaterialsRepository = remember {
@@ -454,6 +455,7 @@ fun IA4TubeNavHost(
             )
             LoginScreen(
                 viewModel = viewModel,
+                googleAuthRepository = repository,
                 onLoggedIn = ::continueAfterAuth
             )
         }
@@ -464,6 +466,7 @@ fun IA4TubeNavHost(
             )
             RegisterScreen(
                 viewModel = viewModel,
+                googleAuthRepository = repository,
                 onRegisteredIn = ::continueAfterAuth,
                 onBack = { navController.popBackStack() }
             )

@@ -42,10 +42,12 @@ import br.com.ia4tube.app.ui.components.ScreenScaffold
 @Composable
 fun LoginScreen(
     viewModel: LoginViewModel,
-    onLoggedIn: () -> Unit
+    onLoggedIn: () -> Unit,
+    googleAuthRepository: br.com.ia4tube.app.data.repository.AuthRepository? = null
 ) {
     val state by viewModel.uiState.collectAsState()
     var senhaVisivel by rememberSaveable { mutableStateOf(false) }
+    var googleBusy by remember { mutableStateOf(false) }
     val loginFocusRequester = remember { FocusRequester() }
     val senhaFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -55,7 +57,7 @@ fun LoginScreen(
     }
 
     LaunchedEffect(Unit) {
-        loginFocusRequester.requestFocus()
+        if (googleAuthRepository == null) loginFocusRequester.requestFocus()
     }
 
     ScreenScaffold {
@@ -67,8 +69,14 @@ fun LoginScreen(
             verticalArrangement = Arrangement.Top,
             horizontalAlignment = Alignment.Start
         ) {
-            Text("IA4Tube", style = MaterialTheme.typography.headlineLarge)
+            Text("iA4tube", style = MaterialTheme.typography.headlineLarge)
             Text("Entre para acompanhar suas artes.", style = MaterialTheme.typography.bodyLarge)
+            if (googleAuthRepository != null) {
+                Spacer(modifier = Modifier.height(20.dp))
+                GoogleSignInAction(googleAuthRepository, state.loading, { googleBusy = it }, onLoggedIn)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("ou use WhatsApp e senha", style = MaterialTheme.typography.bodyMedium)
+            }
             Spacer(modifier = Modifier.height(24.dp))
 
             OutlinedTextField(
@@ -76,7 +84,7 @@ fun LoginScreen(
                     .fillMaxWidth()
                     .focusRequester(loginFocusRequester),
                 value = state.login,
-                enabled = !state.loading,
+                enabled = !state.loading && !googleBusy,
                 onValueChange = viewModel::onLoginChange,
                 label = { Text("WhatsApp ou login") },
                 keyboardOptions = KeyboardOptions(
@@ -96,7 +104,7 @@ fun LoginScreen(
                     .fillMaxWidth()
                     .focusRequester(senhaFocusRequester),
                 value = state.senha,
-                enabled = !state.loading,
+                enabled = !state.loading && !googleBusy,
                 onValueChange = viewModel::onSenhaChange,
                 label = { Text("Senha") },
                 visualTransformation = if (senhaVisivel) {
@@ -107,7 +115,7 @@ fun LoginScreen(
                 trailingIcon = {
                     PasswordVisibilityButton(
                         visible = senhaVisivel,
-                        enabled = !state.loading,
+                        enabled = !state.loading && !googleBusy,
                         onToggle = { senhaVisivel = !senhaVisivel }
                     )
                 },
@@ -117,7 +125,7 @@ fun LoginScreen(
                 ),
                 keyboardActions = KeyboardActions(
                     onDone = {
-                        if (!state.loading) {
+                        if (!state.loading && !googleBusy) {
                             focusManager.clearFocus()
                             viewModel.submit()
                         }
@@ -135,7 +143,7 @@ fun LoginScreen(
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !state.loading,
+                enabled = !state.loading && !googleBusy,
                 onClick = {
                     focusManager.clearFocus()
                     viewModel.submit()

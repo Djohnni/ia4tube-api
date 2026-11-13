@@ -51,8 +51,8 @@ android {
         applicationId = "com.ia4tube.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 108
-        versionName = "0.2.95"
+        versionCode = 109
+        versionName = "0.2.96"
         buildConfigField("boolean", "ASSISTANT_HOME_ENABLED", providers.gradleProperty("ia4tubeAssistantHome").map { it.toBooleanStrict().toString() }.getOrElse("false"))
 
         buildConfigField("String", "API_BASE", productionApiBase.asBuildConfigString())
@@ -217,6 +217,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
     implementation("com.google.firebase:firebase-messaging")
+    implementation("androidx.credentials:credentials:1.6.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
     implementation("com.google.android.play:app-update:2.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
