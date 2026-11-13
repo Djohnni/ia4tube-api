@@ -19,6 +19,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -27,11 +30,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -86,36 +91,26 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
     onPosts:()->Unit,onProfile:()->Unit,onPlans:()->Unit,onCalendar:()->Unit,
     onInput:(String)->Unit,onSend:()->Unit,onPlan:()->Unit,onGallery:()->Unit,onCamera:()->Unit,
     onRemove:(String)->Unit,onReview:()->Unit,onReport:(String)->Unit,onContinue:()->Unit) {
-    val typing=WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current)>0
     val scroll=rememberScrollState()
     LaunchedEffect(state.snapshot?.messages?.size,state.attachments.size,state.busy,state.error){
         if(!state.snapshot?.messages.isNullOrEmpty() || state.attachments.isNotEmpty() || state.busy || state.error!=null){
             withFrameNanos { };scroll.animateScrollTo(scroll.maxValue)
         }
     }
-    Column(Modifier.fillMaxSize().border(1.dp,palette.panelBorder,RoundedCornerShape(20.dp)).padding(12.dp)
+    Column(Modifier.fillMaxSize()
         .testTag("home_assistant"),verticalArrangement=Arrangement.spacedBy(7.dp)) {
         val snapshot=state.snapshot
         if(state.loading)LinearProgressIndicator(Modifier.fillMaxWidth(),color=palette.primaryBorder)
         Column(Modifier.weight(1f).fillMaxWidth().testTag("assistant_messages").verticalScroll(scroll),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-            if(snapshot?.messages.isNullOrEmpty())AssistantBubble("Vamos preparar seus posts?",false,palette)
             snapshot?.messages?.forEach { m ->
-                AssistantBubble(m.text,m.role=="user",palette)
-                if(m.role=="assistant"&&m.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id)
-                    TextButton(onClick={onReport(m.id)},contentPadding=PaddingValues(0.dp),modifier=Modifier.height(32.dp)){
-                        Text("Sinalizar resposta",color=palette.textSecondary,fontSize=11.sp)
-                    }
+                AssistantBubble(m.text,m.role=="user",palette,
+                    onReport=if(m.role=="assistant"&&m.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id)({onReport(m.id)})else null)
                 if(m.photos.isNotEmpty())Text("${m.photos.size} foto(s) enviada(s)",color=palette.textSecondary,fontSize=12.sp)
             }
             if(state.busy)Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){
                 CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp,color=palette.primaryBorder)
                 Text("Preparando…",color=palette.textSecondary,fontSize=13.sp)
             }
-        if(!typing&&snapshot?.messages.isNullOrEmpty())OutlinedButton(onClick={onPlan()},enabled=!state.busy,
-            border=BorderStroke(1.dp,palette.primaryBorder),modifier=Modifier.testTag("assistant_plan_month")){
-            Text("Planejar meu mês",color=palette.textPrimary)
-        }
-        if(!typing&&snapshot!=null&&!snapshot.hasLogo&&snapshot.messages.isEmpty())TextButton(onClick=onProfile){Text("Adicionar logo da empresa",color=palette.primaryBorder)}
         if(state.attachments.isNotEmpty())Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
             state.attachments.forEach { p ->
                 val bitmap=remember(p.file.path){BitmapFactory.decodeFile(p.file.path,BitmapFactory.Options().apply{inSampleSize=4})?.asImageBitmap()}
@@ -138,13 +133,11 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
         if(state.error?.contains("Ative a publicação") == true)TextButton(onClick=onCalendar){Text("Abrir Calendário",color=palette.primaryBorder)}
         if(state.retryPending&&!state.busy)TextButton(onClick=onContinue){Text("Continuar com uma nova mensagem",color=palette.primaryBorder,fontSize=12.sp)}
         }
-        Row(Modifier.fillMaxWidth().border(1.dp,palette.panelBorder,RoundedCornerShape(18.dp)).padding(4.dp).testTag("assistant_composer"),verticalAlignment=Alignment.CenterVertically){
-            OutlinedTextField(value=state.input,onValueChange=onInput,placeholder={Text("Escreva sua mensagem…",fontSize=13.sp)},
-                enabled=!state.busy&&!state.retryPending,modifier=Modifier.weight(1f).testTag("assistant_message"),maxLines=5,
-                colors=OutlinedTextFieldDefaults.colors(focusedBorderColor=androidx.compose.ui.graphics.Color.Transparent,
-                    unfocusedBorderColor=androidx.compose.ui.graphics.Color.Transparent,disabledBorderColor=androidx.compose.ui.graphics.Color.Transparent,
-                    focusedPlaceholderColor=palette.textSecondary,unfocusedPlaceholderColor=palette.textSecondary,cursorColor=palette.primaryBorder,
-                    focusedTextColor=palette.textPrimary,unfocusedTextColor=palette.textPrimary))
+        Row(Modifier.fillMaxWidth().padding(horizontal=4.dp,vertical=6.dp).testTag("assistant_composer"),verticalAlignment=Alignment.CenterVertically){
+            BasicTextField(value=state.input,onValueChange=onInput,
+                enabled=!state.busy&&!state.retryPending,modifier=Modifier.weight(1f).padding(horizontal=10.dp,vertical=12.dp).testTag("assistant_message"),maxLines=5,
+                textStyle=TextStyle(color=palette.textPrimary,fontSize=16.sp),cursorBrush=SolidColor(palette.primaryBorder),
+                decorationBox={inner->Box {if(state.input.isEmpty())Text("Mensagem",color=palette.textSecondary,fontSize=16.sp);inner()}})
             IconButton(onClick={onGallery()},enabled=!state.busy&&!state.retryPending&&state.attachments.size<4,
                 modifier=Modifier.size(44.dp).testTag("assistant_gallery")){
                 Icon(painterResource(R.drawable.chat_attachment),contentDescription="Escolher fotos da galeria",tint=palette.textPrimary,modifier=Modifier.size(22.dp))
@@ -158,24 +151,24 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
                 Icon(painterResource(R.drawable.chat_send),contentDescription=if(state.retryPending)"Confirmar a mesma tentativa" else "Enviar mensagem",modifier=Modifier.size(22.dp))
             }
         }
-        if(snapshot!=null)Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
-            Text("${snapshot.used}/${snapshot.limit} mensagens",color=palette.textSecondary,fontSize=11.sp)
-            Text("${snapshot.images} imagens · ${snapshot.videos} vídeos",color=palette.textSecondary,fontSize=11.sp)
-        }
         if(snapshot!=null&&snapshot.images<=0&&snapshot.videos<=0)TextButton(onClick=onPlans){Text("Ver combos",color=palette.primaryBorder)}
-        if(!typing)Text("Assistente de IA · confira as informações antes de confirmar.",fontSize=11.sp,color=palette.textSecondary)
     }
 }
 
 @Composable
-private fun AssistantBubble(text:String,user:Boolean,palette:PremiumHomePalette){
-    Row(Modifier.fillMaxWidth(),horizontalArrangement=if(user)Arrangement.End else Arrangement.Start){
+private fun AssistantBubble(text:String,user:Boolean,palette:PremiumHomePalette,onReport:(()->Unit)?=null){
+    Row(Modifier.fillMaxWidth().padding(horizontal=8.dp),horizontalArrangement=if(user)Arrangement.End else Arrangement.Start){
         val foreground=if(user)Color(0xFF211706)else Color(0xFFF6F7F9)
         Column(Modifier.fillMaxWidth(if(user).86f else .94f)
             .clip(RoundedCornerShape(topStart=14.dp,topEnd=14.dp,bottomEnd=if(user)4.dp else 14.dp,bottomStart=if(user)14.dp else 4.dp))
             .background(if(user)Color(0xFFE6BD59)else Color(0xFF24272E)).padding(12.dp)
             .testTag(if(user)"assistant_bubble_user" else "assistant_bubble_assistant"),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            Text(if(user)"Você"else"iA4tube",color=if(user)foreground else Color(0xFFFFD76A),fontSize=11.sp,fontWeight=FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Text(if(user)"Você"else"iA4tube",color=if(user)foreground else Color(0xFFFFD76A),fontSize=11.sp,fontWeight=FontWeight.Bold,modifier=Modifier.weight(1f))
+                if(onReport!=null)IconButton(onClick=onReport,modifier=Modifier.size(24.dp).testTag("assistant_report")) {
+                    Icon(Icons.Default.MoreVert,contentDescription="Sinalizar resposta",tint=foreground,modifier=Modifier.size(18.dp))
+                }
+            }
             Text(text,color=foreground,fontSize=15.sp)
         }
     }

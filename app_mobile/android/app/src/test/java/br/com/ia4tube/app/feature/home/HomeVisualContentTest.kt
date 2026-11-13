@@ -69,6 +69,10 @@ class HomeVisualContentTest {
             assertEquals("",home.label(home.tag("home_assistant_icons")))
             assertNull(home.findTag("home_brand"))
             assertTrue("The enlarged conversation must retain at least 300dp",home.tag("assistant_messages").boundsInRoot.height>=600f)
+            val composer=home.tag("assistant_composer").boundsInRoot
+            assertTrue("The composer uses the screen width without a surrounding card",composer.left<=10f&&composer.right>=home.widthPx-10f)
+            assertNull(home.findTag("assistant_plan_month"))
+            assertTrue(home.nodes().none { home.label(it).contains("Assistente de IA · confira") })
             val user=home.tag("assistant_bubble_user")
             val assistant=home.tag("assistant_bubble_assistant")
             assertTrue(home.label(user).startsWith("Você "))
@@ -77,6 +81,7 @@ class HomeVisualContentTest {
             home.assertAction("home_instagram","instagram")
             home.assertAction("home_brand_icon","edit")
             home.assertAction("home_calendar","calendar")
+            home.assertAction("assistant_report","report")
             home.capture("assistant104-header-and-messages.png")
         }
     }

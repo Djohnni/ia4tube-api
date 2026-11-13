@@ -166,7 +166,8 @@ internal fun HomeVisualContent(
     ) {
         Column(
             Modifier.weight(1f).fillMaxWidth().then(if(assistantContent == null) Modifier.verticalScroll(scroll) else Modifier).testTag("home_scroll")
-                .padding(horizontal = 20.dp, vertical = 10.dp),
+                .padding(horizontal = if (assistantContent == null) 20.dp else 0.dp,
+                    vertical = if (assistantContent == null) 10.dp else 4.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             if (assistantContent != null) HomeAssistantIconHeader(assistantTyping, onOpenInstagram, onEditVideoClick, onOpenPlannedArts)
