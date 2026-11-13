@@ -101,14 +101,14 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     return { ...l, images: imageCount, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {} };
   }
   function counters(s, l) { return s.counters[l.period] ||= { messages: 0, usd: 0 }; }
-  function wire(s, f) { const c = s.counters[f.period] || { messages: 0, usd: 0 }; return { ok: true, revision: s.revision,
-    messages: s.messages.slice(-40), photos: s.photos.slice(-40).map(({ id, name }) => ({ id, name })), draft: s.draft || null,
+  function wire(s, f) { const c = s.counters[f.period] || { messages: 0, usd: 0 }, messages = s.messages.slice(-40); return { ok: true, revision: s.revision,
+    messages, photos: s.photos.slice(-40).map(({ id, name }) => ({ id, name })), draft: s.draft || null,
     campaigns: s.campaigns.map(c => {
       const next = s.messages.findIndex(m => m.role === "user" && s.attempts[m.id]?.at > c.createdAt);
       const legacyAnchor = next === 0 ? "" : s.messages[next > 0 ? next - 1 : s.messages.length - 1]?.id || "";
       return { id: c.id, status: c.status, sent: c.items.filter(i => i.state === "sent").length, total: c.items.length,
         afterMessageId: c.afterMessageId || legacyAnchor, error: c.error || null };
-    }),
+    }).filter(c => c.status !== "sent" || messages.some(m => m.id === c.afterMessageId)),
     capabilities: CAPABILITIES,
     images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, businessType: f.profile?.ramo || "", messageLimit: f.messages,
     messagesUsed: c.messages, budgetReached: c.usd + .01 > f.budgetUsd }; }

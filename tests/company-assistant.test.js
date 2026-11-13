@@ -194,3 +194,13 @@ test("last photo refers to the last submitted chat attachment, not an unused upl
   assert(!payload.preferredPhotoIds.includes(unused));
   assert.equal(content.filter(c=>c.type==="input_image").length,0);assert.equal(f.submissions.length,0);
 });
+
+test("a completed receipt outside the visible history cannot close an unrelated new conversation",async t=>{
+  const f=await fixture(t),s=await draft(f);await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
+  const file=path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),raw=JSON.parse(fs.readFileSync(file,"utf8"));
+  assert.equal(raw.campaigns[0].status,"sent");
+  raw.messages.push(...Array.from({length:40},(_,n)=>({id:uuid(),role:n%2?"assistant":"user",text:"Outro assunto",photoIds:[]})));
+  fs.writeFileSync(file,JSON.stringify(raw));
+  assert.equal((await f.service.state(claims())).campaigns.length,0);
+  assert.equal(JSON.parse(fs.readFileSync(file,"utf8")).campaigns[0].status,"sent");assert.equal(f.submissions.length,1);
+});
