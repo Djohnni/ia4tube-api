@@ -35,7 +35,7 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube, exclusivamente para prep
   "Descreva brevemente as novas fotos em photoDescriptions; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial. A marca é exatamente iA4tube.";
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
-  clock = Date.now, enabled = true, pilots = [], submitFetch = globalThis.fetch }) {
+  clock = Date.now, enabled = true, pilots = [], submitFetch = globalThis.fetch, dispatchSpacingMs = 4500 }) {
   const busy = new Set(), rates = new Map(); let stopped = false, timer = null, running = false;
   function account(claims) {
     const owner = claims?.whatsapp;
@@ -223,7 +223,14 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     body.set("logo", new Blob([fs.readFileSync(path.join(folder(owner), campaign.id + "-logo.png"))], { type: "image/png" }), "logo.png");
     body.set("photos", new Blob([fs.readFileSync(path.join(folder(owner), row.photoId + ".png"))], { type: "image/png" }), "imagem.png");
     row.state = "submitting"; save(owner, s);
-    const response = await submitFetch(RECEIVER, { method: "POST", redirect: "error", signal: AbortSignal.timeout(180000), headers: { "Idempotency-Key": hash(row.requestId) }, body });
+    // Reuse the receiver's existing origin contract and stay below its twenty requests/minute limit.
+    const dispatchClock = path.join(root, "dispatch-clock.json");
+    const last = fs.existsSync(dispatchClock) ? JSON.parse(fs.readFileSync(dispatchClock, "utf8")).at : 0;
+    const wait = Math.max(0, Number(last || 0) + dispatchSpacingMs - clock());
+    if (wait > 0) await new Promise(resolve => setTimeout(resolve, Math.min(wait, dispatchSpacingMs)));
+    atomicWriteJson(dispatchClock, { at: clock() });
+    const response = await submitFetch(RECEIVER, { method: "POST", redirect: "error", signal: AbortSignal.timeout(180000),
+      headers: { Origin: "https://ia4tube.com", "Idempotency-Key": hash(row.requestId) }, body });
     const result = await response.json(), a = result.admission;
     const context = row.requestId.replaceAll("-", "");
     if (!response.ok || result.status !== "awaiting_authorization" || result.orderId !== admissionOrderId(row.ticket) ||

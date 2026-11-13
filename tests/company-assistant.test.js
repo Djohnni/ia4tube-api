@@ -11,7 +11,7 @@ async function fixture(t, options={}) {
   billing.applyManualPlanPayment(client,plans.getPlan("i4_combo_20i_15v_v1"),{paymentId:"test",paidAt:"2099-01-15T12:00:00Z"});
   const png=await sharp({create:{width:100,height:80,channels:3,background:"#ff8800"}}).png().toBuffer();
   const contextCalls=[],submissions=[],providerCalls=[];let output={reply:"Envie uma foto para preparar seu mês.",photoDescriptions:[],items:[]};
-  const service=createAssistantService({root,clock:()=>NOW,pilots:[OWNER],apiKey:"fake-test-key",
+  const service=createAssistantService({root,clock:()=>NOW,pilots:[OWNER],apiKey:"fake-test-key",dispatchSpacingMs:0,
     readClient:o=>o===OWNER?client:null, profile:{get:()=>({profile:{has_logo:true}}),logo:()=>png},
     observeConnection:async()=>({state:"connected",health:"healthy"}),
     calendar:{availability:async()=>({availability:{canImage:true,canVideo:true}}),createContext:async(c,v)=>{
@@ -43,7 +43,7 @@ test("message retry reuses completed attempt and key never appears in saved stat
   await f.service.message(claims(),input);await f.service.message(claims(),input);
   assert.equal(f.providerCalls.length,1);assert.equal(f.providerCalls[0].body.model,MODEL);assert.equal(f.providerCalls[0].body.store,false);
   await assert.rejects(f.service.message(claims(),{...input,message:"Alterado"}),{code:"assistant_request_conflict"});
-  for(const dir of fs.readdirSync(f.root)){const raw=fs.readFileSync(path.join(f.root,dir,"state.json"),"utf8");assert(!raw.includes("fake-test-key"));}
+  for(const dir of fs.readdirSync(f.root,{withFileTypes:true}).filter(d=>d.isDirectory())){const raw=fs.readFileSync(path.join(f.root,dir.name,"state.json"),"utf8");assert(!raw.includes("fake-test-key"));}
 });
 test("uncertain OpenAI call is preserved and never called again automatically",async t=>{
   const f=await fixture(t,{providerFailure:true}),input={requestId:uuid(),message:"Olá",photoIds:[]};
