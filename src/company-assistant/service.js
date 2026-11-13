@@ -186,10 +186,10 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       const f = await facts(claims); if (!f.hasLogo) fail("logo_required", 422);
       if (!f.connected) fail("instagram_required", 422);
       assertBalances(d.items, f);
-      const slots = new Set(); const items = d.items.map((item, n) => {
+      const items = d.items.map((item, n) => {
         const v = input.items[n]; fields(v, ["id", "date", "time", "destination"]);
         if (v.id !== item.id || !["feed", "story", "both"].includes(v.destination)) fail("draft_changed");
-        const at = dateTime(v.date, v.time); if (at <= clock() || at > clock() + 179 * 864e5 || slots.has(at)) fail("schedule_invalid", 400); slots.add(at);
+        const at = dateTime(v.date, v.time); if (at <= clock() || at > clock() + 179 * 864e5) fail("schedule_invalid", 400);
         return { ...item, date: v.date, time: v.time, destination: v.destination, state: "pending" };
       });
       const id = crypto.randomUUID(), logo = profile.logo(owner);
