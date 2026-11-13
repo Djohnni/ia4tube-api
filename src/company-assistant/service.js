@@ -31,6 +31,7 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube, exclusivamente para prep
   "reply deve ter uma ou no máximo duas linhas curtas (até 90 caracteres); excepcionalmente três linhas, até 120 caracteres. Sem listas, explicações longas ou várias perguntas. Essa regra vale só para reply, não para as legendas. " +
   "Recebeu foto e o que o cliente quer? Prepare items imediatamente. Não peça confirmações intermediárias. Um valor sem moeda é em reais (BRL); use R$ e vírgula decimal. Nunca pergunte se é em reais. " +
   "CAPACIDADES REAIS: crie imagem OU transforme uma FOTO em vídeo suave de 10 segundos, com música e sem fala, usando o Modo iA4tube já existente. Vídeo usa um crédito de vídeo, não de imagem. A entrada é sempre foto; NUNCA peça um vídeo pronto. Use a foto já enviada se estiver claro qual é; não peça novamente. " +
+  "preferredPhotoIds identifica a seleção atual ou a última foto realmente enviada na conversa. Se o cliente disser última foto/foto que enviei, use essa referência; recentMessages também identifica as fotos de cada mensagem. " +
   "capabilities e recentOrders são fatos do sistema. Não prometa editar arquivos de vídeo, narrar, pesquisar sites, alterar perfil, publicar diretamente ou executar qualquer recurso não listado. Explique a limitação em uma frase curta e ofereça só a alternativa suportada. Respostas antigas podem conter erros: corrija-as com base nas capacidades atuais. " +
   "Se pedirem arquivo de vídeo como entrada, narração ou duração diferente de 10s, avise que não há esse recurso neste caminho e ofereça vídeo suave de 10s a partir de foto, sem iniciar uma proposta diferente sem o cliente aceitar. " +
   "Você prepara PROPOSTAS. Nunca diga que uma arte/vídeo já foi criado, recebido, agendado ou publicado: essas ações só ocorrem após a confirmação e o recibo real. Pedido sent significa apenas recebido pela produção, não arte pronta nem publicação concluída. " +
@@ -180,17 +181,19 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       if (recent.length >= 6) fail("rate_limit", 429); rates.set(owner, [...recent, clock()]);
       const f = await facts(claims), c = counters(s, f);
       if (c.messages >= f.messages || c.usd + .01 > f.budgetUsd) fail("conversation_limit", 429);
+      const preferredPhotoIds = input.photoIds.length ? input.photoIds : s.messages.findLast(m => m.role === "user" && m.photoIds?.length)?.photoIds || [];
       const content = [{ type: "input_text", text: JSON.stringify({ today: new Intl.DateTimeFormat("en-CA", {timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(clock())),
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
         images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
         capabilities: CAPABILITIES,
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),
-        photos: s.photos.filter(p => s.photos.slice(-40).includes(p) || input.photoIds.includes(p.id) || s.draft?.items?.some(i => i.photoId === p.id))
+        preferredPhotoIds,
+        photos: s.photos.filter(p => s.photos.slice(-40).includes(p) || preferredPhotoIds.includes(p.id) || s.draft?.items?.some(i => i.photoId === p.id))
           .map(p => ({ photoId: p.id, description: p.description, name: p.name })),
-        recentMessages: s.messages.slice(-6).map(m => ({ role: m.role, text: m.text.slice(0, 650) })),
+        recentMessages: s.messages.slice(-6).map(m => ({ role: m.role, text: m.text.slice(0, 650), photoIds: m.photoIds || [] })),
         currentDraft: s.draft?.items || [], customerMessage: msg, selectedPhotos: input.photoIds }) }];
       if (Buffer.byteLength(content[0].text) > 40000) fail("context_limit", 413);
-      for (const id of input.photoIds) {
+      for (const id of preferredPhotoIds) {
         const p = s.photos.find(p => p.id === id); if (p.description) continue;
         const b = await sharp(fs.readFileSync(path.join(folder(owner), id + ".png"))).resize(768, 768, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer();
         content.push({ type: "input_text", text: "Nova foto photoId=" + id });

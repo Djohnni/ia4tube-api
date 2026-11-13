@@ -182,3 +182,15 @@ test("invalid output kind is refused before calendar or production",async t=>{
   const f=await fixture(t),s=await draft(f),input=confirmation(s);input.items[0].kind="audio";
   await assert.rejects(f.service.confirm(claims(),input),{code:"assistant_draft_changed"});assert.equal(f.contextCalls.length,0);
 });
+
+test("last photo refers to the last submitted chat attachment, not an unused upload",async t=>{
+  const f=await fixture(t),s=await draft(f),shared=s.draft.items[0].photoId,unused=uuid();
+  await f.service.upload(claims(),unused,f.png,"foto-nao-enviada.png");
+  f.setOutput({reply:"Vou usar a foto enviada.",photoDescriptions:[],items:[]});
+  await f.service.message(claims(),{requestId:uuid(),message:"Use a última foto",photoIds:[]});
+  const content=f.providerCalls.at(-1).body.input[0].content,payload=JSON.parse(content[0].text);
+  assert.deepEqual(payload.preferredPhotoIds,[shared]);
+  assert(payload.recentMessages.some(m=>m.photoIds.includes(shared)));
+  assert(!payload.preferredPhotoIds.includes(unused));
+  assert.equal(content.filter(c=>c.type==="input_image").length,0);assert.equal(f.submissions.length,0);
+});
