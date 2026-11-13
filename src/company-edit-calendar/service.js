@@ -113,12 +113,13 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     admit: admission.admit, remainingImages: admission.remainingImages, remainingVideos: admission.remainingVideos, bind, orderRoot, clock, fault, feedAdapter: readyImageFeedAdapter });
   const imageCaptions = require("./image-caption").createImageCaptionService({ ...imageCaptionOptions,
     enabled: admissionEnabled, root, directories, ticketContext, ownerClient, remainingImages: admission.remainingImages, remainingVideos: admission.remainingVideos, clock });
-  async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null } = {}) {
+  async function createContext(claims, input, { freeArtBlocked = false, ipIdentity = null, assistantTrial = false, requireCalendar = false } = {}) {
     const current = ownerClient(claims), request = contextInput(input, clock());
     const id = request.requestId, digest = hash(JSON.stringify(request));
     const prior = read(contextFile(id));
     if (prior) {
       verifyContext(prior, id, current.owner);
+      if (requireCalendar && !prior.envelope) fail("consent_required", 409);
       if (prior.requestHash !== digest || prior.phase !== "pending" || prior.expiresAt <= clock()) fail("context_conflict");
       return contextResponse(prior);
     }
@@ -136,12 +137,14 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     const planningId = `pm_edit_${id.replace(/-/g, "")}`;
     const factory = await prepareCalendarRequest(claims);
     const envelope = factory?.({ planningId, quantity: 1 }) || null;
+    if (requireCalendar && !envelope) fail("consent_required", 409);
     // The async preference lookup may race an identical mobile retry.
     const release = acquireLock();
     try {
       const raced = read(contextFile(id));
       if (raced) {
         verifyContext(raced, id, current.owner);
+        if (requireCalendar && !raced.envelope) fail("consent_required", 409);
         if (raced.requestHash !== digest || raced.phase !== "pending" || raced.expiresAt <= clock()) fail("context_conflict");
         return contextResponse(raced);
       }
@@ -154,7 +157,8 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       const row = { schema: 1, id, owner: current.owner, request, requestHash: digest,
         planningId, pedidoId: `edit_${id.replace(/-/g, "")}`, phase: "pending", createdAt: clock(), expiresAt: clock() + TTL,
         ticketHash: hash(ticket.split(".")[1]), envelope, freeArtBlocked: freeArtBlocked === true, ipIdentity: safeIpIdentity,
-        ...(sessionIdentity ? { sessionIdentity } : {}), ...(admissionEnabled ? { admissionRequired: true } : {}) };
+        ...(sessionIdentity ? { sessionIdentity } : {}), ...(admissionEnabled ? { admissionRequired: true } : {}),
+        ...(assistantTrial === true && sessionIdentity ? { assistantTrial: true } : {}) };
       atomicWriteJson(contextFile(id), row);
       return contextResponse(row);
     } finally { release(); }
@@ -286,6 +290,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     verifyImageCaptionCapability: imageCaptions.verifyCapability, generateImageCaption: imageCaptions.generate,
     imageCaptionCanEdit: imageCaptions.canEdit,
     verifyAdmissionCapability: admission.verifyCapability, availability: admission.availability,
+    assistantTrialRemaining: admission.assistantTrialRemaining,
     cancelAdmission: admission.cancel, close() { admission.close(); key.fill(0); } });
 }
 module.exports = { createEditCalendarService, contextInput, bindInput };

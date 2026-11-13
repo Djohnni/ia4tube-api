@@ -1,0 +1,104 @@
+"use strict";
+const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs"), os = require("node:os"), path = require("node:path"), crypto = require("node:crypto"), sharp = require("sharp");
+const { createAssistantService, MODEL } = require("../src/company-assistant/service");
+const { admissionOrderId } = require("../src/company-edit-calendar/admission-contract");
+const billing = require("../src/billing/billing.service"), plans = require("../src/billing/plans");
+const uuid = () => crypto.randomUUID(), hash = x => crypto.createHash("sha256").update(x).digest("hex");
+const NOW = Date.parse("2099-01-16T12:00:00Z"), OWNER = "159911205989";
+const claims = (owner=OWNER) => ({whatsapp:owner,company_id:owner,token_version:2,sub:owner});
+async function fixture(t, options={}) {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"i4-assistant-")), client={ativo:true};
+  billing.applyManualPlanPayment(client,plans.getPlan("i4_combo_20i_15v_v1"),{paymentId:"test",paidAt:"2099-01-15T12:00:00Z"});
+  const png=await sharp({create:{width:100,height:80,channels:3,background:"#ff8800"}}).png().toBuffer();
+  const contextCalls=[],submissions=[],providerCalls=[];let output={reply:"Envie uma foto para preparar seu mês.",photoDescriptions:[],items:[]};
+  const service=createAssistantService({root,clock:()=>NOW,pilots:[OWNER],apiKey:"fake-test-key",
+    readClient:o=>o===OWNER?client:null, profile:{get:()=>({profile:{has_logo:true}}),logo:()=>png},
+    observeConnection:async()=>({state:"connected",health:"healthy"}),
+    calendar:{availability:async()=>({availability:{canImage:true,canVideo:true}}),createContext:async(c,v)=>{
+      contextCalls.push(v);return {ticket:v.requestId+"."+"T".repeat(43)};
+    }},
+    fetchImpl:async(url,opt)=>{providerCalls.push({url,body:JSON.parse(opt.body)});if(options.providerFailure)throw Error("network");
+      return {ok:true,json:async()=>({status:"completed",usage:{input_tokens:1000,output_tokens:200},output:[{content:[{type:"output_text",text:JSON.stringify(output)}]}]})};},
+    submitFetch:async(url,opt)=>{const data=JSON.parse(opt.body.get("data"));submissions.push({url,data,key:opt.headers["Idempotency-Key"]});
+      if(options.submitFailure)throw Error("network");const id=admissionOrderId(data.appCalendar.ticket),context=data.appCalendar.ticket.split(".")[0].replaceAll("-","");
+      return {ok:true,json:async()=>({status:"awaiting_authorization",totalCents:0,orderId:options.badReceipt?uuid():id,admission:{schemaVersion:1,admissionId:uuid(),requestHash:hash("request"),contextHash:hash(data.appCalendar.ticket),mediaKind:data.mediaKind,quantity:1,state:"reserved",reservedAt:NOW,editOrderId:id,planningId:"pm_edit_"+context,pedidoId:"edit_"+context}})};
+    }});
+  t.after(()=>{service.close();fs.rmSync(root,{recursive:true,force:true});});
+  return {service,root,png,client,contextCalls,submissions,providerCalls,setOutput:o=>{output=o;}};
+}
+async function draft(f,kind="image") {
+  const id=uuid();await f.service.upload(claims(),id,f.png,"foto.png");
+  f.setOutput({reply:"Preparei esta publicação. Confira antes de criar.",photoDescriptions:[{photoId:id,description:"Produto fotografado em uma mesa."}],
+    items:[{photoId:id,kind,title:"Sua oferta",caption:"Confira nossa oferta!",imageText:"R$ 39,90",segment:"Comércio; visual limpo",date:"2099-01-17",time:"18:05",destination:"both"}]});
+  return f.service.message(claims(),{requestId:uuid(),message:"Crie uma oferta por R$ 39,90.",photoIds:[id]});
+}
+const confirmation = snapshot => ({draftId:snapshot.draft.id,version:snapshot.draft.version,confirmed:true,items:snapshot.draft.items.map(({id,date,time,destination})=>({id,date,time,destination}))});
+const tick=()=>new Promise(r=>setImmediate(r));
+test("ownership and internal pilot are enforced before any provider call",async t=>{
+  const f=await fixture(t);await assert.rejects(f.service.state(claims("other")),{code:"assistant_unavailable"});
+  await assert.rejects(f.service.state({...claims(),company_id:"other"}),{code:"assistant_session_required"});assert.equal(f.providerCalls.length,0);
+});
+test("message retry reuses completed attempt and key never appears in saved state",async t=>{
+  const f=await fixture(t),input={requestId:uuid(),message:"Planeje meu mês",photoIds:[]};
+  await f.service.message(claims(),input);await f.service.message(claims(),input);
+  assert.equal(f.providerCalls.length,1);assert.equal(f.providerCalls[0].body.model,MODEL);assert.equal(f.providerCalls[0].body.store,false);
+  await assert.rejects(f.service.message(claims(),{...input,message:"Alterado"}),{code:"assistant_request_conflict"});
+  for(const dir of fs.readdirSync(f.root)){const raw=fs.readFileSync(path.join(f.root,dir,"state.json"),"utf8");assert(!raw.includes("fake-test-key"));}
+});
+test("uncertain OpenAI call is preserved and never called again automatically",async t=>{
+  const f=await fixture(t,{providerFailure:true}),input={requestId:uuid(),message:"Olá",photoIds:[]};
+  await assert.rejects(f.service.message(claims(),input));await assert.rejects(f.service.message(claims(),input),{code:"assistant_attempt_preserved"});
+  assert.equal(f.providerCalls.length,1);assert.equal((await f.service.state(claims())).messagesUsed,1);
+});
+test("gallery bytes are checked, idempotent, and isolated from other accounts",async t=>{
+  const f=await fixture(t),id=uuid();await f.service.upload(claims(),id,f.png,"foto.png");await f.service.upload(claims(),id,f.png,"foto.png");
+  assert.equal((await f.service.state(claims())).photos.length,1);assert((f.service.photo(claims(),id)).length>0);
+  await assert.rejects(f.service.upload(claims(),uuid(),Buffer.from("not image"),"bad.png"));
+  assert.throws(()=>f.service.photo(claims(),"../private"),{code:"assistant_photo_not_found"});
+});
+test("photo instruction becomes a reviewable draft without creating an order",async t=>{
+  const f=await fixture(t),s=await draft(f);assert.equal(s.draft.items[0].imageText,"R$ 39,90");
+  assert.equal(f.providerCalls[0].body.input[0].content.filter(c=>c.type==="input_image").length,1);
+  assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+  const id=s.messages.find(m=>m.role==="assistant").id;assert.deepEqual(f.service.report(claims(),{messageId:id}),{ok:true});
+});
+test("confirmed image uses unchanged Modo iA4tube receiver and calendar entry once",async t=>{
+  const f=await fixture(t),s=await draft(f),body=confirmation(s),first=await f.service.confirm(claims(),body);
+  await tick();await f.service.processPending();await tick();
+  const repeat=await f.service.confirm(claims(),body);assert.equal(first.campaignId,repeat.campaignId);
+  assert.equal(f.submissions.length,1);assert.equal(f.contextCalls.length,1);
+  const v=f.submissions[0];assert.equal(v.data.mediaKind,"image");assert.equal(v.data.imageText,"R$ 39,90");
+  assert.equal(v.data.imageCaption,"Confira nossa oferta!");assert.equal(v.key,hash(s.draft.items[0].requestId));
+  assert.equal((await f.service.state(claims())).campaigns[0].status,"sent");
+  await assert.rejects(f.service.confirm(claims(),{...body,items:body.items.map(i=>({...i,time:"19:00"}))}),{code:"assistant_request_conflict"});
+});
+for(const issue of ["submitFailure","badReceipt"])test(`${issue}: no automatic repeat, original campaign remains for attention`,async t=>{
+  const f=await fixture(t,{[issue]:true}),s=await draft(f);await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
+  assert.equal((await f.service.state(claims())).campaigns[0].status,"needs_attention");await f.service.processPending();assert.equal(f.submissions.length,1);
+});
+test("expired date is refused before any order or provider generation",async t=>{
+  const f=await fixture(t),s=await draft(f),body=confirmation(s);body.items[0].date="2099-01-15";
+  await assert.rejects(f.service.confirm(claims(),body),{code:"assistant_schedule_invalid"});assert.equal(f.submissions.length,0);
+});
+test("video is one video quota and retains the established ten second model",async t=>{
+  const f=await fixture(t),s=await draft(f,"video");await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
+  assert.equal(f.submissions[0].data.mediaKind,"video");assert.equal(f.submissions[0].data.sextou.durationSeconds,10);
+  assert.equal(f.submissions[0].data.showcase.videoId,"d0591ca4-1c6a-470a-9f78-57ba4d266b8c");
+});
+test("changing the conversation invalidates a discarded draft before creation",async t=>{
+  const f=await fixture(t),s=await draft(f);f.setOutput({reply:"Certo, vamos mudar o planejamento.",photoDescriptions:[],items:[]});
+  await f.service.message(claims(),{requestId:uuid(),message:"Descarte esta proposta.",photoIds:[]});
+  await assert.rejects(f.service.confirm(claims(),confirmation(s)),{code:"assistant_draft_changed"});assert.equal(f.submissions.length,0);
+});
+test("one shared standalone credit cannot fund an image plus a video",async t=>{
+  const f=await fixture(t),s=await draft(f),p=s.draft.items[0].photoId;
+  f.client.artes_mensais_restantes=0;f.client.videos_mensais_restantes=0;f.client.artes_avulsas_restantes=1;
+  const item={photoId:p,kind:"image",title:"Imagem",caption:"Oferta",imageText:null,segment:"Loja",date:null,time:null,destination:"both"};
+  f.setOutput({reply:"Duas propostas",photoDescriptions:[],items:[item,{...item,kind:"video"}]});
+  await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Faça uma imagem e um vídeo",photoIds:[p]}),{code:"assistant_balance_required"});
+  assert.equal(f.submissions.length,0);
+});
+test("six messages per minute are allowed and a burst cannot add a seventh paid call",async t=>{
+  const f=await fixture(t);for(let n=0;n<6;n++)await f.service.message(claims(),{requestId:uuid(),message:"Planejar",photoIds:[]});
+  await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Planejar",photoIds:[]}),{code:"assistant_rate_limit"});assert.equal(f.providerCalls.length,6);
+});

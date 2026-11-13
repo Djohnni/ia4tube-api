@@ -793,7 +793,8 @@ function refreshPlanningReservationCounters(cliente) {
 function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const freeArtBlocked = options?.freeArtBlocked === true;
   const freeArtOptions = { freeArtBlocked,
-    instagramFreeClaim: options?.instagramFreeClaim === true && options.mediaKind === "image" };
+    instagramFreeClaim: options?.instagramFreeClaim === true && options.mediaKind === "image",
+    instagramFreeClaimLimit: options?.instagramFreeClaimLimit === 3 ? 3 : 1 };
   const billing = billingService.getBillingStatus(cliente, freeArtOptions);
   const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
@@ -1509,7 +1510,7 @@ function externalEditRegistration(value) {
 }
 
 function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, freeArtBlocked = false, calendarAuthorizationFactory = null,
-  externalEdit = null, instagramFreeClaim = false }) {
+  externalEdit = null, instagramFreeClaim = false, instagramFreeClaimLimit = 1 }) {
   const editRegistration = externalEditRegistration(externalEdit);
   const instagramDestination = require("../social/calendar/destinations").destination(body.instagram_destination || "feed");
   const parsedPhotoItems = parsePlanningPhotoItems(body);
@@ -1534,7 +1535,9 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   const billingOptions = { freeArtBlocked,
     mediaKind: editRegistration ? editRegistration.mediaKind || "video" : "image",
     instagramFreeClaim: instagramFreeClaim === true && editRegistration?.kind === "edit_calendar_admission_v1" &&
-      editRegistration.mediaKind === "image" };
+      editRegistration.mediaKind === "image",
+    instagramFreeClaimLimit: instagramFreeClaimLimit === 3 && instagramFreeClaim === true &&
+      editRegistration?.kind === "edit_calendar_admission_v1" && editRegistration.mediaKind === "image" ? 3 : 1 };
   const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, billingOptions);
   const ciclo = planCycle(cliente);
   const planningId = editRegistration ? `pm_edit_${editRegistration.contextId.replace(/-/g, "")}` : newPlanningId();

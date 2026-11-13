@@ -255,6 +255,49 @@ test("signup never emits the retired generic gift and never resets consumed lega
   } finally { if (old === undefined) delete process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY; else process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY = old; }
 });
 const freeClient = { plano_status: "none", artes_mensais_restantes: 0, arte_gratis_disponivel: false, arte_gratis_usada: false, arte_gratis_usos: [] };
+test("trusted assistant offers three image trials in total and the fourth cannot reserve", async t => {
+  const f = fixture(t, { client: freeClient });
+  const claims = {whatsapp:f.owner,sub:f.owner,company_id:f.owner,token_version:2};
+  assert.equal(await f.service.assistantTrialRemaining(claims),3);
+  for(let n=0;n<3;n++) {
+    const request=f.body((await f.context(f.owner,{assistantTrial:true})).ticket);
+    await f.service.admit(request);await f.service.admit(request);await f.service.bind(f.bindBody(request));
+    assert.equal(f.readClients()[f.owner].arte_gratis_usos.length,n+1);
+    assert.equal(await f.service.assistantTrialRemaining(claims),2-n);
+  }
+  const fourth=f.body((await f.context(f.owner,{assistantTrial:true})).ticket);
+  await assert.rejects(f.service.admit(fourth),{code:"billing_required"});
+  const classic=f.body((await f.context()).ticket);await assert.rejects(f.service.admit(classic),{code:"billing_required"});
+  assert.equal(f.readClients()[f.owner].artes_mensais_restantes,0);
+});
+test("assistant context cannot silently produce outside the authorized calendar path",async t=>{
+  const f=fixture(t),before=f.readClients();
+  await assert.rejects(f.context(f.owner,{assistantTrial:true,requireCalendar:true}),{code:"edit_calendar_consent_required"});
+  assert.deepEqual(f.readClients(),before);
+  const contexts=path.join(f.root,"private/edit-calendar/contexts");
+  assert.equal(fs.existsSync(contexts)?fs.readdirSync(contexts).length:0,0);
+});
+test("the historical free image is included rather than added to three assistant images", async t => {
+  const f=fixture(t,{client:{...freeClient,arte_gratis_usada:true,arte_gratis_usos:[{pedido_id:"old"}]}});
+  const claims={whatsapp:f.owner,sub:f.owner,company_id:f.owner,token_version:2};
+  assert.equal(await f.service.assistantTrialRemaining(claims),2);
+  for(let n=0;n<2;n++){const r=f.body((await f.context(f.owner,{assistantTrial:true})).ticket);await f.service.admit(r);await f.service.bind(f.bindBody(r));}
+  assert.equal(await f.service.assistantTrialRemaining(claims),0);assert.equal(f.readClients()[f.owner].arte_gratis_usos.length,3);
+});
+test("assistant trials retain one Instagram owner and never create free videos",async t=>{
+  const f=fixture(t,{client:freeClient}),r=f.body((await f.context(f.owner,{assistantTrial:true})).ticket);
+  await f.service.admit(r);await f.service.bind(f.bindBody(r));
+  const other=f.body((await f.context(f.other,{assistantTrial:true})).ticket);await assert.rejects(f.service.admit(other),{code:"billing_required"});
+  const video=f.body((await f.context(f.owner,{assistantTrial:true})).ticket,"video");await assert.rejects(f.service.admit(video),{code:"billing_required"});
+  f.setConnection(null);assert.equal(await f.service.assistantTrialRemaining({whatsapp:f.owner}),0);
+});
+test("cancelled assistant admission returns only its reserved trial and replay cannot add rights",async t=>{
+  const f=fixture(t,{client:freeClient}),r=f.body((await f.context(f.owner,{assistantTrial:true})).ticket);
+  const claims={whatsapp:f.owner};await f.service.admit(r);assert.equal(await f.service.assistantTrialRemaining(claims),2);
+  await f.cancel(r);await f.cancel(r);assert.equal(await f.service.assistantTrialRemaining(claims),3);
+  for(let n=0;n<3;n++){const next=f.body((await f.context(f.owner,{assistantTrial:true})).ticket);await f.service.admit(next);await f.service.bind(f.bindBody(next));}
+  assert.equal(await f.service.assistantTrialRemaining(claims),0);
+});
 test("one confirmed Instagram image consumes the existing common free-art right exactly once", async t => {
   const f = fixture(t, { client: freeClient }), request = f.body((await f.context()).ticket);
   await f.service.admit(request); await f.service.admit(request);

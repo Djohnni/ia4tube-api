@@ -4128,6 +4128,22 @@ app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunne
   admissionAuthenticate: editAdmissionAuthentication.authenticate, readyImageUpload,
   readyImageCleanup: file => cleanupUploadedFiles({ image: file ? [file] : [] }) }));
 
+// Additive internal pilot. It creates ordinary Edit requests; it never publishes to Meta.
+const companyAssistant = require("./src/company-assistant/service").createAssistantService({
+  root: path.join(DATA_DIR, "company_assistant_v1"),
+  enabled: process.env.IA4TUBE_ASSISTANT_ENABLED !== "false",
+  pilots: (process.env.IA4TUBE_ASSISTANT_PILOTS || "159911205989,159911205997,159911205999").split(",").map(v => v.trim()).filter(Boolean),
+  readClient: owner => readClientes()[owner],
+  profile: require("./src/company-profile/service").createCompanyProfileService({ baseDir: path.join(DATA_DIR, "company_profiles") }),
+  calendar: editCalendarService,
+  observeConnection: claims => productionSocialIntegration.observeEditConnection(claims),
+  apiKey: process.env.OPENAI_API_KEY
+});
+app.use("/empresa/assistente", require("./src/company-assistant/router").createAssistantRouter({
+  authenticate: productionSession.authenticate, service: companyAssistant
+}));
+companyAssistant.start();
+
 app.post(
   "/empresa/planejamento-mensal/solicitar",
   auth,

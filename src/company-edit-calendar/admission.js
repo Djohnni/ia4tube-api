@@ -52,6 +52,28 @@ function createEditAdmissionService(ports) {
     if (!existing) write(claimFile(row.admission.editOrderId), identity);
   }
   // Shared observation predicate. It never creates a grant, migrates the ledger, writes or reserves.
+  // A trusted assistant context may use three trial images in total, including the old one.
+  // The same owner/Instagram ledger fences all requests; paid balances and videos are untouched.
+  function inspectAssistantTrial(owner, client, connection, value, admissionId = null) {
+    if (!confirmedInstagram(connection) || billing.getFreeArtStatus(structuredClone(client)).arte_gratis_ativa !== true) return null;
+    const ownerKey = fingerprint("owner", owner), instagramKey = fingerprint("instagram", connection.externalId);
+    const entry = value.owners[ownerKey], externalOwner = value.instagram[instagramKey];
+    if (externalOwner && externalOwner !== ownerKey || entry?.instagramKey && entry.instagramKey !== instagramKey) return null;
+    const legacyUsed = entry?.trialLegacyUsed ?? Math.max(Number(legacyConsumed(client)),
+      Number(["consumed", "reserved", "legacy_consumed"].includes(entry?.state)));
+    const active = Object.values(entry?.assistantClaims || {}).filter(c => c.state !== "available").length;
+    const used = Math.max(legacyUsed + active, Array.isArray(client.arte_gratis_usos) ? client.arte_gratis_usos.length : 0, Number(legacyConsumed(client)));
+    const current = admissionId && entry?.assistantClaims?.[admissionId];
+    if (used >= 3 && !current) return null;
+    return { ownerKey, instagramKey, limit: 3, legacyUsed, remaining: Math.max(0, 3 - used) };
+  }
+  async function assistantTrialRemaining(claims) {
+    if (!enabled || typeof observeConnection !== "function") return 0;
+    let current = ownerClient(claims), connection;
+    try { connection = await observeConnection(claims); } catch { return 0; }
+    current = ownerClient(claims);
+    return inspectAssistantTrial(current.owner, current.client, connection, ledger())?.remaining || 0;
+  }
   function inspectFreeClaim(owner, client, connection, value, { ipIdentity = null, blocked = false, admissionId = null } = {}) {
     if (!confirmedInstagram(connection) || legacyConsumed(client)) return null;
     const ownerKey = fingerprint("owner", owner), instagramKey = fingerprint("instagram", connection.externalId);
@@ -64,6 +86,8 @@ function createEditAdmissionService(ports) {
     return { ownerKey, instagramKey, grandfather: client.arte_gratis_disponivel === true };
   }
   function freeClaim(row, connection, current) {
+    if (row.assistantTrial === true && row.admission.mediaKind === "image")
+      return inspectAssistantTrial(row.owner, current.client, connection, ledger(), row.admission.admissionId);
     if (row.admission.mediaKind !== "image" || !confirmedInstagram(connection) || legacyConsumed(current.client)) return null;
     const value = ledger(); let migrated = false;
     // Conservative, idempotent migration under the same allocation lock. Keep a consumed owner fingerprint
@@ -140,6 +164,17 @@ function createEditAdmissionService(ports) {
   function reserveFreeClaim(row) {
     const claim = row.admission.freeClaim;
     if (!claim) return;
+    if (claim.limit === 3) {
+      const value = ledger(), prior = value.owners[claim.ownerKey];
+      if (value.instagram[claim.instagramKey] && value.instagram[claim.instagramKey] !== claim.ownerKey ||
+          prior?.instagramKey && prior.instagramKey !== claim.instagramKey) fail("allocation_reconciliation_required", 503);
+      const entry = prior || { state: "assistant_trial", instagramKey: claim.instagramKey };
+      entry.instagramKey = claim.instagramKey; entry.trialLegacyUsed ??= claim.legacyUsed;
+      entry.assistantClaims ||= {};
+      entry.assistantClaims[row.admission.admissionId] = { planningId: row.planningId, state: "reserved" };
+      value.owners[claim.ownerKey] = entry; value.instagram[claim.instagramKey] = claim.ownerKey;
+      write(ledgerFile, value); return;
+    }
     const value = ledger(), prior = value.owners[claim.ownerKey];
     if (value.instagram[claim.instagramKey] && value.instagram[claim.instagramKey] !== claim.ownerKey ||
         prior && prior.instagramKey !== claim.instagramKey ||
@@ -154,6 +189,11 @@ function createEditAdmissionService(ports) {
     const claim = row.admission?.freeClaim;
     if (!claim) return;
     const value = ledger(), prior = value.owners[claim.ownerKey];
+    if (claim.limit === 3) {
+      const entry = prior?.assistantClaims?.[row.admission.admissionId];
+      if (!entry || prior.instagramKey !== claim.instagramKey) fail("allocation_reconciliation_required", 503);
+      entry.state = state; write(ledgerFile, value); return;
+    }
     if (!prior || prior.admissionId !== row.admission.admissionId || prior.instagramKey !== claim.instagramKey)
       fail("allocation_reconciliation_required", 503);
     prior.state = state;
@@ -185,6 +225,7 @@ function createEditAdmissionService(ports) {
         externalEdit: { kind: "edit_calendar_admission_v1", contextId: row.id, editOrderId: value.editOrderId,
           requestHash: value.requestHash, admissionId: value.admissionId, mediaKind: value.mediaKind }, freeArtBlocked: !value.freeClaim,
         instagramFreeClaim: Boolean(value.freeClaim),
+        instagramFreeClaimLimit: value.freeClaim?.limit === 3 ? 3 : 1,
         calendarAuthorizationFactory: () => row.envelope });
       fault("admission_after_request");
       writeClients(current.clients);
@@ -234,7 +275,7 @@ function createEditAdmissionService(ports) {
     assertEnabled(); const request = admissionInput(input);
     const { row: initial, current: before } = inspectCapability(request);
     let connection = null;
-    if ((!initial.admission || initial.admission.state === "allocating") && initial.phase !== "bound" && request.mediaKind === "image" && !legacyConsumed(before.client) &&
+    if ((!initial.admission || initial.admission.state === "allocating") && initial.phase !== "bound" && request.mediaKind === "image" && (!legacyConsumed(before.client) || initial.assistantTrial === true) &&
         !billing.hasAvailablePlanArt(before.client) && typeof observeConnection === "function") {
       // Observational existing service only. No provider call, OAuth transition or calendar synchronization.
       try { connection = await observeConnection(initial.sessionIdentity); }
@@ -393,7 +434,7 @@ function createEditAdmissionService(ports) {
       write(contextFile(row.id), row); return response(row);
     } finally { release(); }
   }
-  return Object.freeze({ admit, status, cancel, availability, remainingImages, remainingVideos, verifyCapability, assertBind, prepareBind, finishBind,
+  return Object.freeze({ admit, status, cancel, availability, remainingImages, remainingVideos, assistantTrialRemaining, verifyCapability, assertBind, prepareBind, finishBind,
     claimIdentity(row) { return { schema: 2, contextId: row.id, admissionId: row.admission.admissionId, requestHash: row.admission.requestHash }; },
     close() { key.fill(0); } });
 }

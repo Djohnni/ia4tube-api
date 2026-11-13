@@ -298,7 +298,8 @@ function getFreeArtStatus(cliente, options = {}) {
   // Only the verified Edit admission may spend the shared one-time benefit.
   // A legacy signup flag is not an authorization to create a free order.
   const available = options?.instagramFreeClaim === true && freeArtFeatureEnabled() &&
-    !blocked && used !== true && cliente?.arte_gratis_disponivel === true;
+    !blocked && (used !== true || options.instagramFreeClaimLimit === 3 &&
+      Math.max(1, Number(cliente?.arte_gratis_usos?.length || 0)) < 3) && cliente?.arte_gratis_disponivel === true;
 
   return {
     arte_gratis_ativa: freeArtFeatureEnabled(),
