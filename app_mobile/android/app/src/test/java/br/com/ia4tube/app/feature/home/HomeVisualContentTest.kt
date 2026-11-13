@@ -57,12 +57,29 @@ class HomeVisualContentTest {
             val composer=home.tag("assistant_composer").boundsInRoot
             val chat=home.tag("home_assistant").boundsInRoot
             assertTrue("Messages must have a visible scrolling area", messages.height >= 96f)
+            assertTrue("The latest reply must be visible, rather than scrolled out by auxiliary buttons",
+                home.nodes().first { home.label(it) == snapshot.messages.last().text }.boundsInRoot.height >= 48f)
             assertTrue("The composer must retain its touchable height", composer.height >= 96f)
             assertTrue("The composer must remain inside the chat",composer.bottom<=chat.bottom+1)
             assertTrue("Messages must end before the composer",messages.bottom<=composer.top+1)
             home.assertAction("assistant_gallery","gallery")
             home.assertAction("assistant_camera","camera")
             home.capture("assistant102-messages-and-composer.png")
+        }
+    }
+    @Test fun actualAssistantKeepsComposerVisibleWhenKeyboardResizesWindowWithoutImeInsets() {
+        val snapshot=AssistantSnapshot(listOf(AssistantMessage("m1","assistant","Envie suas fotos pelo clipe ou pela câmera.",emptyList())),
+            null,emptyList(),12,1,true,false,1,60,false)
+        HomeHarness(assistant=true,heightDp=420,chatState=AssistantUiState(snapshot=snapshot,loading=false,input="Preparar meu mês")).use { home ->
+            assertNull("The header temporarily yields space while typing",home.findTag("home_instagram"))
+            assertNull("The footer returns after the keyboard closes",home.findTag("home_footer"))
+            val messages=home.tag("assistant_messages").boundsInRoot
+            val composer=home.tag("assistant_composer").boundsInRoot
+            assertTrue("The conversation retains useful space above the keyboard",messages.height>=160f)
+            assertTrue("The entire composer is in the resized viewport",composer.bottom<=home.tag("home_assistant").boundsInRoot.bottom)
+            home.assertAction("assistant_gallery","gallery")
+            home.assertAction("assistant_camera","camera")
+            home.capture("assistant103-keyboard-viewport.png")
         }
     }
     @Test fun actualAssistantPhotoAndStatusCannotConsumeAllMessageSpace() {

@@ -105,7 +105,7 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
             snapshot?.messages?.forEach { m ->
                 AssistantBubble(m.text,m.role=="user",palette)
                 if(m.role=="assistant"&&m.id==snapshot.messages.lastOrNull{it.role=="assistant"}?.id)
-                    TextButton(onClick={onReport(m.id)},contentPadding=PaddingValues(0.dp)){
+                    TextButton(onClick={onReport(m.id)},contentPadding=PaddingValues(0.dp),modifier=Modifier.height(32.dp)){
                         Text("Sinalizar resposta",color=palette.textSecondary,fontSize=11.sp)
                     }
                 if(m.photos.isNotEmpty())Text("${m.photos.size} foto(s) enviada(s)",color=palette.textSecondary,fontSize=12.sp)
@@ -118,7 +118,7 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
             border=BorderStroke(1.dp,palette.primaryBorder),modifier=Modifier.testTag("assistant_plan_month")){
             Text("Planejar meu mês",color=palette.textPrimary)
         }
-        if(!typing&&snapshot!=null&&!snapshot.hasLogo)TextButton(onClick=onProfile){Text("Adicionar logo da empresa",color=palette.primaryBorder)}
+        if(!typing&&snapshot!=null&&!snapshot.hasLogo&&snapshot.messages.isEmpty())TextButton(onClick=onProfile){Text("Adicionar logo da empresa",color=palette.primaryBorder)}
         if(state.attachments.isNotEmpty())Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){
             state.attachments.forEach { p ->
                 val bitmap=remember(p.file.path){BitmapFactory.decodeFile(p.file.path,BitmapFactory.Options().apply{inSampleSize=4})?.asImageBitmap()}

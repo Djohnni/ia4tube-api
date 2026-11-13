@@ -111,7 +111,7 @@ internal fun HomeVisualContent(
     assistantContent: (@Composable () -> Unit)? = null
 ) {
     val scroll = rememberScrollState()
-    val assistantTyping = assistantContent != null && WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val assistantImeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val scope = rememberCoroutineScope()
     var otherForms by rememberSaveable { mutableStateOf(false) }
     var more by rememberSaveable { mutableStateOf(false) }
@@ -127,6 +127,10 @@ internal fun HomeVisualContent(
         (if (state.artesAvulsasRestantes > 0) " · ${state.artesAvulsasRestantes} créditos anteriores" else "")
         else "$credits imagens disponíveis"
 
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    // Some system bars consume IME insets before Compose receives them. The resized
+    // viewport still identifies the compact keyboard layout without touching other screens.
+    val assistantTyping = assistantContent != null && (assistantImeVisible || maxHeight < 600.dp)
     Column(
         Modifier.fillMaxSize().then(if(assistantContent != null) Modifier.imePadding() else Modifier).background(Brush.verticalGradient(
             listOf(palette.panelGradient.first(), palette.screenBackground, palette.screenBackground)
@@ -216,6 +220,7 @@ internal fun HomeVisualContent(
         if (!assistantTyping) HomeVisualFooter(palette, credits,
             onHome = { otherForms = false; scope.launch { scroll.scrollTo(0) } },
             onCombo = lockable(onOpenPlans), onMore = { more = true })
+    }
     }
 
     if (more) {
