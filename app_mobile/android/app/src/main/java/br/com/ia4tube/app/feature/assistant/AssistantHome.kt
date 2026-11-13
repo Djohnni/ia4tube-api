@@ -134,6 +134,9 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
         if(state.retryPending&&!state.busy)TextButton(onClick=onContinue){Text("Continuar com uma nova mensagem",color=palette.primaryBorder,fontSize=12.sp)}
         }
         Row(Modifier.fillMaxWidth().padding(horizontal=4.dp,vertical=6.dp).heightIn(min=48.dp).testTag("assistant_composer"),verticalAlignment=Alignment.CenterVertically){
+            Row(Modifier.weight(1f).heightIn(min=48.dp).clip(RoundedCornerShape(24.dp))
+                .background(palette.cameraBackground).border(1.dp,palette.panelBorder,RoundedCornerShape(24.dp))
+                .testTag("assistant_input_box"),verticalAlignment=Alignment.CenterVertically){
             BasicTextField(value=state.input,onValueChange=onInput,
                 enabled=!state.busy&&!state.retryPending,modifier=Modifier.weight(1f).padding(horizontal=10.dp,vertical=12.dp).testTag("assistant_message"),maxLines=5,
                 textStyle=TextStyle(color=palette.textPrimary,fontSize=16.sp),cursorBrush=SolidColor(palette.primaryBorder),
@@ -146,6 +149,8 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
                 enabled=!state.busy&&!state.retryPending&&state.attachments.size<4,modifier=Modifier.size(44.dp).testTag("assistant_camera")){
                 Icon(painterResource(R.drawable.chat_camera),contentDescription="Tirar foto",tint=palette.textPrimary,modifier=Modifier.size(22.dp))
             }
+            }
+            Spacer(Modifier.width(4.dp))
             FilledIconButton(onClick={onSend()},enabled=!state.busy&&(state.input.isNotBlank()||state.attachments.isNotEmpty()||state.retryPending),
                 modifier=Modifier.size(44.dp).testTag("assistant_send"),colors=IconButtonDefaults.filledIconButtonColors(containerColor=palette.primaryBorder)){
                 Icon(painterResource(R.drawable.chat_send),contentDescription=if(state.retryPending)"Confirmar a mesma tentativa" else "Enviar mensagem",modifier=Modifier.size(22.dp))

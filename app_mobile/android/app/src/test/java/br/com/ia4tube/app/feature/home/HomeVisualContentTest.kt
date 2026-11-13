@@ -71,6 +71,7 @@ class HomeVisualContentTest {
             assertTrue("The enlarged conversation must retain at least 300dp",home.tag("assistant_messages").boundsInRoot.height>=600f)
             val composer=home.tag("assistant_composer").boundsInRoot
             assertTrue("The composer uses the screen width without a surrounding card",composer.left<=10f&&composer.right>=home.widthPx-10f)
+            assertTrue("Only the writing field is boxed; send remains outside",home.tag("assistant_input_box").boundsInRoot.right<=home.tag("assistant_send").boundsInRoot.left)
             assertNull(home.findTag("assistant_plan_month"))
             assertTrue(home.nodes().none { home.label(it).contains("Assistente de IA · confira") })
             val user=home.tag("assistant_bubble_user")
