@@ -80,6 +80,20 @@ class EditCalendarOrderScheduleTest {
         assertEquals(selected.destination, body.getString("destination"))
     }
 
+    @Test fun restrictedStoryImagesReopenAnOldFeedSelectionBeforeCreatingAnyContext() {
+        state.setStoryImagesOnly(true)
+        val selected=schedule(1,"18:00").copy(destination="both")
+        state.chooseSchedule(selected,token)
+        state.request(firstId,token,"image")
+        assertTrue(state.choosingSchedule)
+        assertEquals(0,server.requestCount)
+        server.enqueue(success(firstId))
+        val story=selected.copy(destination="story")
+        state.chooseSchedule(story,token)
+        assertNotNull(awaitReply(firstId).ticket)
+        assertSchedule(nextRequest(),firstId,story)
+    }
+
     private fun completeFirst(selected: EditCalendarSchedule = schedule(1, "18:00")): EditCalendarReply {
         server.enqueue(success(firstId))
         state.request(firstId, token)

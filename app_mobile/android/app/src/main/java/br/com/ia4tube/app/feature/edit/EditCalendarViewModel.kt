@@ -36,6 +36,8 @@ internal class EditCalendarViewModel(
         private set
     var reply by mutableStateOf<EditCalendarReply?>(null)
         private set
+    private var storyImagesOnly = false
+    fun setStoryImagesOnly(value: Boolean) { storyImagesOnly = value }
     private var accountKey: String? = null
     private var pendingRequest: String? = null
     private var pendingMediaKind: String? = null
@@ -53,6 +55,7 @@ internal class EditCalendarViewModel(
             job?.cancel(); job = null
             nonce = freshNonce()
             schedule = null
+            storyImagesOnly = false
             choosingSchedule = false
             pendingRequest = null
             pendingMediaKind = null
@@ -106,6 +109,17 @@ internal class EditCalendarViewModel(
             // An uncertain retry retains its original intent instead of
             // silently scheduling the same order for a different time.
             respond(requestId, error = "schedule_expired")
+            return
+        }
+        if (storyImagesOnly && requestedMediaKind == "image" && value != null && value.destination != "story" &&
+            !requestSchedules.containsKey(requestId)) {
+            schedule = value
+            pendingRequest = requestId
+            pendingMediaKind = requestedMediaKind
+            mediaKind = requestedMediaKind
+            showDestinations = true
+            destinationError = "Seu pacote é exclusivo para imagens nos Stories."
+            choosingSchedule = true
             return
         }
         if (value == null || !value.isFuture()) {

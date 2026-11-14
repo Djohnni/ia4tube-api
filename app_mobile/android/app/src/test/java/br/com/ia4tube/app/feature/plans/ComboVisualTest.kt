@@ -30,6 +30,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.LooperMode
+import org.robolectric.shadows.ShadowDialog
 import org.robolectric.shadows.ShadowChoreographer
 import org.robolectric.shadows.ShadowSystemClock
 import java.io.File
@@ -100,7 +101,8 @@ class ComboVisualTest {
             return own+if(view is ViewGroup)(0 until view.childCount).flatMap {owners(view.getChildAt(it))} else emptyList()
         }
         private fun descendants(node:SemanticsNode):List<SemanticsNode> = listOf(node)+node.children.flatMap(::descendants)
-        private fun nodes():List<SemanticsNode> = owners(activity.window.decorView).flatMap {owner ->
+        private fun roots():List<View> = listOf(activity.window.decorView) + listOfNotNull(ShadowDialog.getLatestDialog()?.takeIf { it.isShowing }?.window?.decorView)
+        private fun nodes():List<SemanticsNode> = roots().flatMap(::owners).flatMap {owner ->
             val getter=owner.javaClass.methods.firstOrNull {it.name.startsWith("getUnmergedRootSemanticsNode")&&it.parameterCount==0}
             descendants(getter?.invoke(owner) as? SemanticsNode ?: owner.rootSemanticsNode)
         }
@@ -135,10 +137,15 @@ class ComboVisualTest {
         }
         private fun settle() {Snapshot.sendApplyNotifications();repeat(8) {
             ShadowSystemClock.advanceBy(Duration.ofMillis(64));main.idleFor(Duration.ofMillis(16))
-            activity.window.decorView.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY))
-            activity.window.decorView.layout(0,0,width,height);Snapshot.sendApplyNotifications()
+            for(root in roots()) {
+                val mode=if(root===activity.window.decorView)View.MeasureSpec.EXACTLY else View.MeasureSpec.AT_MOST
+                root.requestLayout()
+                root.measure(View.MeasureSpec.makeMeasureSpec(width,mode),View.MeasureSpec.makeMeasureSpec(height,mode))
+                root.layout(0,0,root.measuredWidth,root.measuredHeight)
+            }
+            Snapshot.sendApplyNotifications()
         };main.idleFor(Duration.ofMillis(32))}
-        override fun close() {try {controller.pause().stop().destroy();Snapshot.sendApplyNotifications();main.idleFor(Duration.ofMillis(32))}
+        override fun close() {try {ShadowDialog.getLatestDialog()?.takeIf { it.isShowing }?.dismiss();controller.pause().stop().destroy();Snapshot.sendApplyNotifications();main.idleFor(Duration.ofMillis(32))}
             finally {ShadowChoreographer.setFrameDelay(oldDelay);ShadowChoreographer.setPaused(oldPaused)}}
     }
 }

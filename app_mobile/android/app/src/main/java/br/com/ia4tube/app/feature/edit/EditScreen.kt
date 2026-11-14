@@ -242,6 +242,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
         storyOnly = (result as? br.com.ia4tube.app.data.models.ApiResult.Success<br.com.ia4tube.app.data.models.MeResponse>)?.value?.let {
             it.storiesAvulsosRestantes > 0 && it.artesMensaisRestantes + it.artesAvulsasRestantes <= 0
         } ?: false
+        calendar.setStoryImagesOnly(storyOnly)
     }
     LaunchedEffect(binding) {
         browser.deferredAvailabilityRequest?.let { (target, document, mainFrame) ->
@@ -490,7 +491,7 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
     var date by remember { mutableStateOf(initial?.let { LocalDate.parse(it.date) } ?: default.toLocalDate()) }
     var time by remember { mutableStateOf(initial?.let { LocalTime.parse(it.time) } ?: default.toLocalTime()) }
-    var destination by remember { mutableStateOf(if (storyOnly) "story" else initial?.destination?.takeIf { it in setOf("feed", "story", "both") } ?: "both") }
+    var destination by remember(storyOnly) { mutableStateOf(if (storyOnly) "story" else initial?.destination?.takeIf { it in setOf("feed", "story", "both") } ?: "both") }
     val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")),
         if (showDestinations) destination else "reel")
     val future = selection.isFuture()
