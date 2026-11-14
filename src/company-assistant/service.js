@@ -6,6 +6,7 @@ const billing = require("../billing/billing.service");
 const { dateTime, caption } = require("../social/calendar/model");
 const { admissionOrderId } = require("../company-edit-calendar/admission-contract");
 const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
+const { accountPlan, currentCatalog, resolveProductReply } = require("./knowledge");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -88,7 +89,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     const standalone = billing.getStandaloneArtStatus(c).artes_avulsas_restantes;
     const paid = billing.isPlanActive(c, new Date(clock()));
     return { images: q.monthly.image.remaining + standalone, videos: q.monthly.video.remaining + standalone, standalone,
-      paid, messages: paid ? 120 : 20, budgetUsd: paid ? 3 / 5.5 : .5 / 5.5,
+      paid, plan: accountPlan(c, paid), messages: paid ? 120 : 20, budgetUsd: paid ? 3 / 5.5 : .5 / 5.5,
       period: paid ? (q.grantRef?.cycleStart || new Date(clock()).toISOString().slice(0, 7)) : "trial" };
   }
   async function facts(claims) {
@@ -99,7 +100,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       (availability.availability?.canImage === true && l.images === 0 ? 1 : 0);
     const imageCount = l.images + trial;
     let p = { profile: {} }; try { p = profile.get(owner); } catch {}
-    return { ...l, images: imageCount, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {} };
+    return { ...l, images: imageCount, trialImages: trial, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {} };
   }
   function counters(s, l) { return s.counters[l.period] ||= { messages: 0, usd: 0 }; }
   function wire(s, f) { const c = s.counters[f.period] || { messages: 0, usd: 0 }, messages = s.messages.slice(-40); return { ok: true, revision: s.revision,
@@ -183,13 +184,16 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       const f = await facts(claims), c = counters(s, f);
       if (c.messages >= f.messages || c.usd + .01 > f.budgetUsd) fail("conversation_limit", 429);
       const helpOnly = !input.photoIds.length && isHelpQuestion(msg);
-      const helpReply = helpOnly ? simpleHelpReply(msg, f) : null;
+      const questionContext = { topic: s.assistanceTopic || "", pendingDraft: !!s.draft };
+      const productReply = helpOnly ? resolveProductReply(msg, f, questionContext) : null;
+      const helpReply = helpOnly ? simpleHelpReply(msg, f, questionContext) : null;
       if (helpReply) {
         // Answer known app questions without a provider call or changing the pending proposal.
         c.messages++;
         s.messages.push({ id: input.requestId, role: "user", text: msg, photoIds: [] },
           { id: crypto.randomUUID(), role: "assistant", text: helpReply, photoIds: [] });
         s.messages = s.messages.slice(-80);
+        s.assistanceTopic = productReply?.topic || (/instagram|insta/i.test(msg) ? "connection" : s.assistanceTopic || "app_help");
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
         save(owner, s); return wire(s, f);
       }
@@ -198,6 +202,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
         images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
         capabilities: CAPABILITIES, requestMode: helpOnly ? "app_help" : "creation_or_conversation",
+        conversationTopic: s.assistanceTopic || null, currentCatalog: currentCatalog(), plan: f.plan, trialImages: f.trialImages,
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),
         preferredPhotoIds,
         photos: s.photos.filter(p => s.photos.slice(-40).includes(p) || preferredPhotoIds.includes(p.id) || s.draft?.items?.some(i => i.photoId === p.id))
@@ -228,6 +233,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         for (const d of (helpOnly ? [] : out.photoDescriptions) || []) { const p = s.photos.find(p => p.id === d.photoId); if (p && !p.description) p.description = text(d.description, 700); }
         if (items.length) s.draft = { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, items };
         else if (discardRequested(msg)) s.draft = null;
+        if (items.length) s.assistanceTopic = "creation";
         s.messages.push({ id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] }); s.messages = s.messages.slice(-80);
         const usage = data.usage || {}, usd = (Number(usage.input_tokens) * .1 + Number(usage.output_tokens) * .5) / 1e6;
         if (!Number.isFinite(usd) || usd < 0 || usd > .05) fail("usage_unconfirmed", 503);

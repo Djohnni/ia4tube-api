@@ -6573,66 +6573,6 @@ app.post("/suporte/chat", auth, async (req, res) => {
 
     const msg = String(mensagem || "").toLowerCase();
 
-// ===== RESPOSTAS GRÁTIS (SEM IA) =====
-if(msg.includes("resultado do jogo") && msg.includes("entender")){
-  return res.json({
-    ok:true,
-    resposta:`Resultado do jogo mostra placar e escudos.\n\nObrigatório:\n- Times\n- Placar\n- Escudos\n\nOpcional:\n- Frase\n- Artilheiros\n- Foto`
-  });
-}
-
-if(msg.includes("próximo jogo jogador") || msg.includes("proximo jogo jogador")){
-  return res.json({
-    ok:true,
-    resposta:`Próximo jogo jogador cria uma arte focada em um jogador para divulgar a próxima partida.\n\nObrigatório:\n- Time A e Time B\n- Escudo do time\n- Foto do jogador\n- Data e horário\n- Campeonato/competição\n\nOpcional:\n- Local`
-  });
-}
-
-if(msg.includes("resultado jogador")){
-  return res.json({
-    ok:true,
-    resposta:`Resultado jogador cria uma arte de resultado com foco no jogador.\n\nObrigatório:\n- Times\n- Placar\n- Escudos\n- Foto do jogador\n\nOpcional:\n- Frase\n- Campeonato/competição`
-  });
-}
-
-if(msg.includes("jogador + escudo") || msg.includes("jogador e escudo")){
-  return res.json({
-    ok:true,
-    resposta:`Jogador + escudo cria uma arte simples e forte com o jogador e o escudo do time.\n\nObrigatório:\n- Nome do jogador\n- Escudo do time\n- Foto do jogador\n\nOpcional:\n- Nenhum`
-  });
-}
-
-if(msg.includes("como baixar") || msg.includes("baixar novamente")){
-  return res.json({
-    ok:true,
-    resposta:"Vá em Meus pedidos e clique em Baixar novamente."
-  });
-}
-
-if(
-  msg.includes("combo") ||
-  msg.includes("combos") ||
-  msg.includes("plano") ||
-  msg.includes("planos") ||
-  msg.includes("assinatura") ||
-  msg.includes("mensalidade") ||
-  msg.includes("essencial") ||
-  msg.includes("profissional") ||
-  msg.includes("empresarial")
-){
-  return res.json({
-    ok:true,
-    resposta:"Combos IA4Tube:\n\n- i4 Essencial: R$ 39,90/mês, 8 artes por mês, 3 Materiais Gráficos da Empresa por mês, 1 Carrossel por mês e suporte via WhatsApp.\n\n- i4 Profissional: R$ 79,90/mês, 20 artes por mês, 5 Materiais Gráficos da Empresa por mês, 1 Material Gráfico de Nicho por mês, 2 Carrosséis por mês e suporte via WhatsApp.\n\n- i4 Empresarial: R$ 149,90/mês, 40 artes por mês, todos os Materiais Gráficos Gerais liberados, 3 Materiais Gráficos de Nicho por mês, 4 Carrosséis por mês e suporte via WhatsApp."
-  });
-}
-
-if(msg.includes("saldo") && msg.includes("como")){
-  return res.json({
-    ok:true,
-    resposta:"Clique em Adicionar saldo no topo da tela."
-  });
-}
-
 // ===== SUPORTE DIRETO (SEM IA) =====
 if(
   msg.includes("erro") ||
@@ -6662,6 +6602,30 @@ if(
   });
 }
 
+// Shared product knowledge; existing human support above always has priority.
+const supportHelp = require("./src/company-assistant/help");
+const supportKnowledge = require("./src/company-assistant/knowledge");
+const currentConversation = abertasHumanas.find(c => c.whatsapp === whatsapp && !c.finalizada);
+const recentMessages = (currentConversation?.mensagens || []).slice(-6).map(m => ({
+  role: m.autor === "cliente" ? "user" : "assistant", text: String(m.texto || "").slice(0, 650)
+}));
+const lastQuestion = recentMessages.findLast(m => m.role === "user")?.text || "";
+let supportFacts = {};
+try {
+  const copy = structuredClone(readClientes()[whatsapp] || {});
+  const quota = billingService.getMediaQuotaStatus(copy);
+  const standalone = billingService.getStandaloneArtStatus(copy).artes_avulsas_restantes;
+  supportFacts = { images: quota.monthly.image.remaining + standalone, videos: quota.monthly.video.remaining + standalone,
+    plan: supportKnowledge.accountPlan(copy, quota.active) };
+} catch {}
+const supportContext = { topic: supportKnowledge.resolveProductReply(lastQuestion)?.topic || "" };
+const fixedReply = supportHelp.simpleHelpReply(mensagem, supportFacts, supportContext);
+if (fixedReply) {
+  const resposta = supportKnowledge.shortReply(fixedReply);
+  const conversa = salvarMensagemSuporteAberta(whatsapp, mensagem, resposta, "sistema");
+  return res.json({ ok: true, conversa_id: conversa.id, modo_humano: false, resposta });
+}
+
 // ===== SE NÃO CAIU EM NADA → USA IA =====
 const pedidos = listPedidoBasesByWhatsapp(whatsapp).slice(0, 5);
 
@@ -6681,151 +6645,15 @@ const pedidos = listPedidoBasesByWhatsapp(whatsapp).slice(0, 5);
       };
     });
 
-    const prompt = `
-Você é o suporte automático da IA4Tube.
-
-REGRAS:
-- Responda sempre em português do Brasil.
-- Responda curto, simples e direto.
-- Não invente status, prazo ou informação.
-- Use os pedidos reais abaixo somente quando o cliente perguntar sobre pedido.
-
-MENU DO SUPORTE:
-1. Dúvida sobre produto
-2. Não consigo enviar pedido
-3. Meu pedido deu erro / alteração
-4. Pedido pronto / download
-5. Pagamento / saldo
-6. Quero falar com suporte
-
-COMPORTAMENTO:
-- Se for cumprimento, responda: "Oi! Escolha uma opção no menu do suporte."
-- Se o cliente pedir opções, disser "quais opções", "me dê as opções" ou algo parecido, responda curto: "Use os botões do menu do suporte."
-- Se o cliente falar "dúvida sobre produto" ou perguntar "como funciona", responda: "Escolha o produto no menu abaixo."
-- Se o cliente perguntar sobre combos, planos, assinatura, mensalidade, Essencial, Profissional ou Empresarial, responda somente: "Combos IA4Tube: i4 Essencial R$ 39,90/mês com 8 artes, 3 Materiais Gráficos da Empresa, 1 Carrossel e suporte via WhatsApp. i4 Profissional R$ 79,90/mês com 20 artes, 5 Materiais Gráficos da Empresa, 1 Material Gráfico de Nicho, 2 Carrosséis e suporte via WhatsApp. i4 Empresarial R$ 149,90/mês com 40 artes, todos os Materiais Gráficos Gerais, 3 Materiais Gráficos de Nicho, 4 Carrosséis e suporte via WhatsApp."
-
-- Se o cliente disser "Quero entender Resultado do jogo", explique somente Resultado do jogo.
-- Se o cliente disser "Quero entender Escalação", explique somente Escalação.
-- Se o cliente disser "Quero entender Contratação", explique somente Contratação.
-- Se o cliente disser "Quero entender Próximo jogo", explique somente Próximo jogo.
-- Se o cliente disser "Quero entender Patrocinador", explique somente Patrocinador.
-- Se o cliente disser "Quero entender Escudo 3D", responda: "Escudo 3D transforma o escudo do time em uma arte 3D moderna. Obrigatório: enviar o escudo do time. Opcional: nenhuma informação extra."
-- Se o cliente disser "Quero entender Próximo jogo jogador", explique somente Próximo jogo jogador.
-- Se o cliente disser "Quero entender Resultado jogador", explique somente Resultado jogador.
-- Se o cliente disser "Quero entender Jogador + escudo", explique somente Jogador + escudo.
-
-- Ao explicar produto, sempre separe "Obrigatório" e "Opcional".
-- Se o cliente disser "Não sei o que preencher", pergunte: "Qual produto você está tentando enviar?"
-- Se o cliente disser "Não consigo enviar imagem", responda: "Tente enviar uma imagem em PNG ou JPG. Se continuar dando erro, vou encaminhar para o suporte."
-- Se o cliente disser "Botão criar minha arte não funciona", responda exatamente: "Vou encaminhar sua solicitação para o suporte."
-- Se o cliente disser "Apareceu erro ao enviar pedido", responda exatamente: "Vou encaminhar sua solicitação para o suporte."
-- Se o cliente disser "Não consigo enviar pedido", pergunte: "Qual produto você está tentando enviar?"
-
-- Se o cliente disser imagem com nome errado, texto errado, escudo errado, imagem estranha, pedir alteração, pedido não chegou, problema técnico ou reclamação, responda exatamente: "Vou encaminhar sua solicitação para o suporte."
-
-- Se o cliente perguntar como baixar, responda: "Vá em Meus pedidos e clique em Baixar novamente."
-- Se o cliente disser "Não apareceu meu pedido pronto", responda: "Confira em Meus pedidos. Se ainda não apareceu, aguarde alguns minutos. Se continuar, vou encaminhar para o suporte."
-- Se o cliente disser "Quero baixar novamente", responda: "Vá em Meus pedidos e clique em Baixar novamente."
-- Se o cliente disser "Meu pedido está demorando", responda: "Aguarde alguns minutos e confira em Meus pedidos. Se continuar demorando, vou encaminhar para o suporte."
-
-- Se o cliente perguntar como adicionar saldo, responda: "Clique em Adicionar saldo no topo da tela e escolha um valor."
-- Se o cliente disser "Paguei e meu saldo não apareceu", responda exatamente: "Vou encaminhar sua solicitação para o suporte."
-- Se o cliente disser "Saldo insuficiente", responda: "Clique em Adicionar saldo no topo da tela e escolha um valor."
-- Se o cliente perguntar valores de saldo, responda: "Você pode adicionar R$8, R$18, R$28 ou R$48."
-
-- Se o cliente pedir suporte humano ou disser "Quero falar com suporte", responda exatamente: "Vou encaminhar sua solicitação para o suporte."
-
-PRODUTOS:
-
-Resultado do jogo:
-- Mostra o placar da partida, os escudos dos times e uma frase relacionada ao jogo.
-- Obrigatório:
-  1. Definir quais times estão jogando.
-  2. Definir o placar.
-  3. Selecionar os escudos.
-- Opcional:
-  4. Criar uma frase.
-  5. Informar campeonato/competição.
-  6. Informar artilheiros.
-  7. Enviar foto do jogo ou do time.
-
-Escalação:
-- Mostra a lista de jogadores do time.
-- Obrigatório:
-  1. Título da arte.
-  2. Escudo do time.
-  3. Nome dos jogadores.
-- Opcional:
-  4. Posição dos jogadores.
-  5. Escudo adversário.
-  6. Foto do jogador ou do time.
-
-Contratação:
-- Anúncio de jogador contratado, renovado ou apresentado.
-- Obrigatório:
-  1. Título da arte.
-  2. Nome do jogador.
-  3. Escudo do time.
-  4. Foto do jogador.
-- Opcional:
-  5. Posição ou idade.
-
-Próximo jogo:
-- Mostra confronto entre dois times com data e horário.
-- Obrigatório:
-  1. Definir os dois times.
-  2. Selecionar os escudos.
-  3. Informar data e horário.
-  4. Informar campeonato/competição.
-- Opcional:
-  5. Informar local.
-
-Patrocinador:
-- Mostra o escudo do time junto com logos de patrocinadores/apoiadores.
-- Obrigatório:
-  1. Título da arte.
-  2. Escudo do time.
-  3. Enviar logos dos patrocinadores.
-- Opcional:
-  4. Texto principal.
-
-Próximo jogo jogador:
-- Arte de próximo jogo com foco em um jogador.
-- Obrigatório:
-  1. Definir os dois times.
-  2. Escudo do time.
-  3. Foto do jogador.
-  4. Data e horário.
-  5. Campeonato/competição.
-- Opcional:
-  6. Local.
-
-Resultado jogador:
-- Arte de resultado com foco no jogador.
-- Obrigatório:
-  1. Definir os times.
-  2. Definir o placar.
-  3. Selecionar os escudos.
-  4. Enviar foto do jogador.
-- Opcional:
-  5. Frase.
-  6. Campeonato/competição.
-
-Jogador + escudo:
-- Arte simples com jogador e escudo do time.
-- Obrigatório:
-  1. Nome do jogador.
-  2. Escudo do time.
-  3. Foto do jogador.
-- Opcional:
-  Nenhum.
-
-PEDIDOS DO CLIENTE:
-${JSON.stringify(resumoPedidos, null, 2)}
-
-MENSAGEM DO CLIENTE:
-${String(mensagem).trim()}
-`;
+    const prompt = supportHelp.HELP_GUIDE + "\n" +
+      "Você está no suporte, não no gerador de artes. Responda somente texto simples em português, até 120 caracteres. " +
+      "Responda a pergunta antes de indicar botões. Não ofereça futebol, preços antigos, carrosséis ou material impresso como oferta atual. " +
+      "Não crie pedidos, não emita Pix, não mude conta/saldo e não publique pelo suporte. " +
+      "Use pedidos reais só se perguntarem sobre pedido. Sem dado, não invente causa ou prazo. " +
+      "Se precisar de atendimento humano, diga Vou encaminhar sua solicitação para o suporte; o caminho existente fará o registro. " +
+      "Não termine toda resposta perguntando se quer robô ou humano: essa escolha já tem controles próprios. " +
+      JSON.stringify({ catalog: supportKnowledge.currentCatalog(), account: supportFacts,
+        recentMessages, conversationTopic: supportContext.topic, orders: resumoPedidos, customerMessage: String(mensagem).trim() });
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -6836,7 +6664,7 @@ ${String(mensagem).trim()}
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "Você é o suporte automático da IA4Tube. Responda curto, claro e em português do Brasil." },
+          { role: "system", content: "Você é o suporte da iA4tube. Responda à dúvida com informação atual e uma ou duas frases curtas." },
           { role: "user", content: prompt }
         ],
         max_tokens: 220,
@@ -6855,12 +6683,11 @@ ${String(mensagem).trim()}
     }
 
     const resposta = data.choices?.[0]?.message?.content?.trim();
-    const respostaFinal = (resposta || "Não consegui responder agora.").trim()
-      + "\n\nQuer continuar conversando com o robô ou prefere falar com humano?";
+    const respostaFinal = supportKnowledge.shortReply(resposta);
 
     const conversa = salvarMensagemSuporteAberta(whatsapp, mensagem, respostaFinal, "ia");
 
-    const respostaLower = respostaFinal.toLowerCase();
+    const respostaLower = String(resposta || "").toLowerCase();
 
     if (
       (respostaLower.includes("encaminhar") && respostaLower.includes("suporte")) ||

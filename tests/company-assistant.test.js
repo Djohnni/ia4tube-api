@@ -292,3 +292,30 @@ test("app help retains the existing message and per-minute limits", async t => {
   await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Onde vejo meu login?",photoIds:[]}),{code:"assistant_rate_limit"});
   assert.equal(f.providerCalls.length,0);assert.equal((await f.service.state(claims())).messagesUsed,6);
 });
+
+for (const kind of ["image", "video"]) test(`${kind}: discovery, price and plan help preserve the proposal through its original confirmation`, async t => {
+  const f=await fixture(t),before=await draft(f,kind),client=structuredClone(f.client);
+  for (const [message,expected] of [
+    ["Eu vim pelo Instagram e queria saber mais sobre", /cria imagens e vídeos da sua empresa/],
+    ["Quero saber sobre esse app", /publica no Instagram nas datas/],
+    ["Quanto custa?", /R\$ 69.*R\$ 259/],
+    ["Qual plano tem 4 vídeos?", /Essencial.*R\$ 99.*4 vídeos/]
+  ]) {
+    const after=await f.service.message(claims(),{requestId:uuid(),message,photoIds:[]});
+    assert.match(after.messages.at(-1).text,expected);assert.deepEqual(after.draft,before.draft);
+  }
+  assert.equal(f.providerCalls.length,1);assert.deepEqual(f.client,client);assert.equal(f.submissions.length,0);
+  const body=confirmation(before);await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();
+  await f.service.confirm(claims(),body);assert.equal(f.submissions.length,1);assert.equal(f.submissions[0].data.mediaKind,kind);
+});
+
+test("unknown app questions receive the catalog and account facts without changing billing or pending media", async t => {
+  const f=await fixture(t),before=await draft(f),client=structuredClone(f.client);
+  f.setOutput({reply:"O app prepara divulgações de diferentes ramos com suas fotos e informações.",photoDescriptions:[],items:[]});
+  const after=await f.service.message(claims(),{requestId:uuid(),message:"Minha loja é de roupas. Como o app pode ajudar?",photoIds:[]});
+  const payload=JSON.parse(f.providerCalls.at(-1).body.input[0].content[0].text);
+  assert.deepEqual(payload.currentCatalog.map(p=>p.price),[69,99,139,199,259]);
+  assert.equal(payload.plan.active,true);assert.equal(payload.plan.name,"Empresarial");assert.equal(payload.trialImages,0);
+  assert.deepEqual(after.draft,before.draft);assert.deepEqual(f.client,client);
+  assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+});

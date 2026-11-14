@@ -1,7 +1,8 @@
 "use strict";
+const { knowledgeGuide, normalize, productQuestion, resolveProductReply } = require("./knowledge");
 
 // Navigation guidance only. No authorization, publication, billing or calendar actions.
-const HELP_GUIDE = "GUIA DE AJUDA DO APP iA4tube: além de preparar publicações, ensine a usar os recursos reais do app. " +
+const HELP_GUIDE = knowledgeGuide() + "GUIA DE AJUDA DO APP iA4tube: além de preparar publicações, ensine a usar os recursos reais do app. " +
   "Dúvidas de uso não são pedidos de criação: responda só à dúvida, com items vazio, preservando a preparação atual. Quando requestMode=app_help, responda apenas à ajuda. Uma pergunta nunca confirma, cancela ou envia uma arte. " +
   "Explique um passo por vez, em uma ou duas frases curtas, até 120 caracteres. Não despeje um tutorial completo. " +
   "Na home há três ícones acima da conversa: Instagram à esquerda; iA4tube/Posts prontos no centro; calendário à direita. " +
@@ -20,21 +21,16 @@ const HELP_GUIDE = "GUIA DE AJUDA DO APP iA4tube: além de preparar publicaçõe
   "Para abandonar só a preparação ainda não enviada, o cliente pode pedir Descarte esta proposta. Isso não cancela pedidos enviados à produção. " +
   "Se faltar informação para ajudar, faça uma única pergunta curta sobre a tela ou a mensagem de erro. Em questões fora deste guia, não invente botões ou recursos.";
 
-const normalized = value => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
+const normalized = normalize;
 
 function isHelpQuestion(value) {
-  const s = normalized(value);
-  // Keep direct production requests (including quoted text) on their existing path.
-  if (/\b(?:crie|gere|transforme|prepare|monte|faca|use|coloque|adicione|escreva|poste|publique|anime|refaca)\b/.test(s) ||
-      /^(?:voce )?pode(?:ria)? (?:fazer|criar|transformar|gerar|preparar|montar|publicar|postar)\b/.test(s) ||
-      /^quero ajuda (?:para|pra|a) (?:preparar|planejar|montar)\b/.test(s)) return false;
-  const question = /^(?:como|onde|qual|quais|por que|porque|pq|o que|posso|me (?:ajud[ae]|expliqu[ea]|ensin[ae])|nao (?:sei|consigo|entendi)|quero (?:saber|entender|conectar|reconectar|vincular)|preciso de ajuda)\b/.test(s) || /\?$/.test(s) ||
-    /^(?:conectar|reconectar) (?:o |meu |o meu )?(?:instagram|insta)[.!]*$/.test(s);
-  return question && /\b(?:instagram|insta|ia4tube|app|aplicativo|calendario|agendamento|agendar|horario|publicacao|publicacoes|postar|feed|story|stories|reel|reels|saldo|credito|creditos|plano|planos|combo|combos|login|senha|conta|perfil|logo|clipe|camera|galeria|foto|fotos|imagem|imagens|video|videos|pedido|pedidos|continuar|botao)\b/.test(s);
+  return productQuestion(value);
 }
 
-function simpleHelpReply(value, facts) {
+function simpleHelpReply(value, facts = {}, context = {}) {
   if (!isHelpQuestion(value)) return null;
+  const product = resolveProductReply(value, facts, context);
+  if (product) return product.reply;
   const s = normalized(value), instagram = /\b(?:instagram|insta)\b/.test(s);
   if (instagram && /\b(?:navegador|chrome|browser)\b/.test(s))
     return "A autorização é pelo navegador oficial do Instagram. Entre nele com a conta que deseja conectar.";
@@ -47,12 +43,12 @@ function simpleHelpReply(value, facts) {
     if (/\b(?:nao|erro|falha)\b/.test(s)) return "Toque no ícone do Instagram e me diga qual mensagem aparece na tela.";
     return "Toque no ícone do Instagram, no alto à esquerda, e depois em Conectar Instagram.";
   }
-  if (/\b(?:login|senha)\b/.test(s) || /\bminha conta\b/.test(s))
+  if (/\b(?:login|senha)\b/.test(s) && (!instagram && context.topic !== "connection"))
     return /\bsenha\b/.test(s) ? "Não envie sua senha aqui. Para consultar seu login: Mais → Perfil da empresa → Minha conta."
       : "Toque em Mais → Perfil da empresa → Minha conta. Lá você vê e copia seu login.";
-  if (/\b(?:saldo|credito|creditos)\b/.test(s))
+  if (/\b(?:saldo|credito|creditos)\b/.test(s) && /\b(?:onde|ver|vejo|consultar|consulto|encontrar)\b/.test(s))
     return "Toque em Mais → Meus combos para ver o resumo do seu saldo de imagens e vídeos.";
-  if (/\b(?:plano|planos|combo|combos)\b/.test(s))
+  if (/\b(?:plano|planos|combo|combos)\b/.test(s) && /\b(?:onde|ver|vejo|abrir|abro)\b/.test(s))
     return "Toque em Combo, na parte de baixo da tela, para consultar os planos disponíveis.";
   if (/\b(?:calendario|agendad[ao]s?|planejad[ao]s?)\b/.test(s) && /\b(?:onde|ver|vejo|consultar|consulto|abrir|abro|encontrar)\b/.test(s))
     return "Toque no ícone do calendário, acima da conversa à direita, para ver suas publicações planejadas.";
