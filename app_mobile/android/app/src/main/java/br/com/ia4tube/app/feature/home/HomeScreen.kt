@@ -173,6 +173,7 @@ fun HomeScreen(
         onOpenPlannedArts = onOpenPlannedArts,
         onCompanyProfile = onCompanyProfile,
         onEditCompanyProfile = onEditCompanyProfile,
+        onRefreshBalance = viewModel::refreshBalance,
         onSupport = onSupport,
         onLogout = onLogout,
         onIconHelpClick = { showIconHelpDialog = true },

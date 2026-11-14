@@ -111,6 +111,7 @@ internal fun HomeVisualContent(
     onIconHelpClick: () -> Unit,
     onLockedFeatureClick: () -> Unit,
     onEditCompanyProfile: () -> Unit = {},
+    onRefreshBalance: () -> Unit = {},
     assistantContent: (@Composable () -> Unit)? = null
 ) {
     val scroll = rememberScrollState()
@@ -231,7 +232,7 @@ internal fun HomeVisualContent(
         }
         if (!assistantTyping) HomeVisualFooter(palette, credits,
             onHome = { otherForms = false; scope.launch { scroll.scrollTo(0) } },
-            onCombo = lockable(onOpenPlans), onMore = { more = true })
+            onCombo = lockable(onOpenPlans), onMore = { onRefreshBalance(); more = true })
     }
     }
 

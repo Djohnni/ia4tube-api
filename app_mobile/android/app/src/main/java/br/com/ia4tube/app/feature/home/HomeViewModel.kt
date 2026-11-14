@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 data class HomeUiState(
@@ -69,9 +70,38 @@ class HomeViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
+    private var balanceJob: Job? = null
 
     init {
         refresh()
+    }
+
+    // Refresh only the displayed balances; opening More must not reload order history.
+    fun refreshBalance() {
+        balanceJob?.cancel()
+        val expectedToken = repository.getSavedToken()
+        if (expectedToken.isBlank()) return
+        balanceJob = viewModelScope.launch {
+            val result = loadMe()
+            if (repository.getSavedToken() != expectedToken) return@launch
+            if (result is ApiResult.Success) {
+                val account = result.value
+                _uiState.update {
+                    it.copy(
+                        planoStatus = account.planoStatus,
+                        planoNome = account.planoNome,
+                        planoAtual = account.planoAtual,
+                        planoRenovaEm = account.planoRenovaEm,
+                        artesMensaisTotal = account.artesMensaisTotal,
+                        artesMensaisRestantes = account.artesMensaisRestantes,
+                        quotaVersion = account.quotaVersion,
+                        videosMensaisRestantes = account.videosMensaisRestantes,
+                        storiesAvulsosRestantes = account.storiesAvulsosRestantes,
+                        artesAvulsasRestantes = account.artesAvulsasRestantes
+                    )
+                }
+            }
+        }
     }
 
     fun refresh() {

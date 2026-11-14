@@ -307,13 +307,21 @@ class HomeVisualContentTest {
     }
 
     @Test fun standaloneStoriesAppearBesideMonthlyCreditsAndInTheComboBadge() {
-        HomeHarness(initial=HomeUiState(loading=false,summaryLoading=false,planoStatus="active",planoNome="Empresarial",
-            quotaVersion=1,artesMensaisRestantes=15,videosMensaisRestantes=15,storiesAvulsosRestantes=4)).use { home ->
+        var balanceReads=0
+        val account=HomeUiState(loading=false,summaryLoading=false,planoStatus="active",planoNome="Empresarial",
+            quotaVersion=1,artesMensaisRestantes=15,videosMensaisRestantes=15,storiesAvulsosRestantes=4)
+        HomeHarness(initial=account,onRefreshBalance={balanceReads++}).use { home ->
+            assertEquals(0,balanceReads)
             assertEquals("34",home.label(home.tag("home_credits_badge")))
             home.assertAction("home_footer_more",null)
+            assertEquals(1,balanceReads)
             val summary=home.label(home.tag("home_plans"))
             assertTrue(summary.contains("15 imagens"));assertTrue(summary.contains("15 vídeos"));assertTrue(summary.contains("4 Stories"))
             home.assertTextFits(home.tag("home_plans"))
+            home.update(account.copy(storiesAvulsosRestantes=3))
+            assertEquals("33",home.label(home.tag("home_credits_badge")))
+            assertTrue(home.label(home.tag("home_plans")).contains("3 Stories"))
+            assertEquals(1,balanceReads)
         }
     }
     @Test fun aStoryOnlyAccountShowsItsOwnCreditsWithoutInventingMonthlyImages() {
@@ -493,7 +501,8 @@ class HomeVisualContentTest {
         fontScale: Float = 1f,
         assistant: Boolean = false,
         chatState: AssistantUiState? = null,
-        guest: Boolean = false
+        guest: Boolean = false,
+        onRefreshBalance: () -> Unit = {}
     ) : AutoCloseable {
         val events = mutableListOf<String>()
         val widthPx = widthDp * 2
@@ -529,6 +538,7 @@ class HomeVisualContentTest {
                             onLogout = { events += "logout" }, onIconHelpClick = { events += "help" },
                             onLockedFeatureClick = { events += "locked" },
                             onEditCompanyProfile = { events += "company-profile-editor" },
+                            onRefreshBalance = onRefreshBalance,
                             assistantContent = if(assistant) ({
                                 if(guest) GuestAssistantHome(premiumHomePalette(PremiumHomeTheme.Black),
                                     onCreateAccount={events+="register"},onSignIn={events+="login"},onAttachmentAuthRequired={events+="auth"})
