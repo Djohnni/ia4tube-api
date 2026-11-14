@@ -365,3 +365,29 @@ test("a generated caption survives a later receiver failure and is not regenerat
   const stored=JSON.parse(fs.readFileSync(path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),"utf8"));
   assert.equal(stored.campaigns[0].items[0].caption,"Confira esta oferta por R$ 39,90!");assert.equal(stored.campaigns[0].status,"needs_attention");
 });
+
+for(const kind of ["image","video"])test(`${kind}: customer visual directions reach existing receiver notes separately from caption and visible text`,async t=>{
+  const f=await fixture(t),s=await draft(f,kind),{id,requestId,...item}=s.draft.items[0];
+  const message="Deixe o fundo mais verde-escuro, mantenha o lanche e coloque a logo pequena no canto direito.";
+  const visualInstructions="Fundo verde-escuro; preservar o lanche e suas cores; logo pequena no canto direito; acabamento limpo.";
+  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[{...item,visualInstructions}]});
+  const changed=await f.service.message(claims(),{requestId:uuid(),message,photoIds:[]});
+  assert.equal(changed.draft.clientRequest,message);assert.equal(changed.draft.items[0].visualInstructions,visualInstructions);
+  await f.service.message(claims(),{requestId:uuid(),message:"Como conectar o Instagram?",photoIds:[]});
+  const body=confirmation(changed);await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();
+  await f.service.confirm(claims(),body);assert.equal(f.submissions.length,1);
+  const data=f.submissions[0].data;assert.match(data.notes,/Orientação visual do cliente — iA4tube/);
+  assert(data.notes.includes(visualInstructions));assert(data.notes.includes(message));
+  assert.equal(data.imageCaption,item.caption);assert.equal(data.imageText,item.imageText);assert.equal(data.mediaKind,kind);
+  assert.equal(f.contextCalls.length,1);assert.equal(f.captionCalls.length,0);
+});
+
+test("photo-specific visual guidance stays with the correct photo in a multi-image draft",async t=>{
+  const f=await fixture(t),a=uuid(),b=uuid();await f.service.upload(claims(),a,f.png,"a.png");await f.service.upload(claims(),b,f.png,"b.png");
+  const make=(photoId,direction)=>({photoId,kind:"image",title:"Oferta",caption:"Legenda",imageText:null,segment:"Comércio",visualInstructions:direction,date:"2099-01-17",time:"18:05",destination:"both"});
+  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[make(a,"Fundo verde e logo no canto direito."),make(b,"Preservar foto e adicionar só a logo.")]});
+  const s=await f.service.message(claims(),{requestId:uuid(),message:"A primeira verde e a segunda só com a logo",photoIds:[a,b]});
+  await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
+  assert.equal(f.submissions.length,2);assert(f.submissions[0].data.notes.includes("Fundo verde e logo no canto direito."));
+  assert(f.submissions[1].data.notes.includes("Preservar foto e adicionar só a logo."));
+});

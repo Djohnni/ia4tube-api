@@ -7,6 +7,7 @@ const { dateTime, caption } = require("../social/calendar/model");
 const { admissionOrderId } = require("../company-edit-calendar/admission-contract");
 const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
 const { accountPlan, currentCatalog, resolveProductReply } = require("./knowledge");
+const { creativeNotes } = require("./creative-brief");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -23,9 +24,10 @@ const outputSchema = { type: "object", additionalProperties: false, required: ["
   reply: { type: "string", maxLength: 120 }, photoDescriptions: { type: "array", items: { type: "object", additionalProperties: false,
     required: ["photoId", "description"], properties: { photoId: { type: "string" }, description: { type: "string" } } } },
   items: { type: "array", items: { type: "object", additionalProperties: false,
-    required: ["photoId", "kind", "title", "caption", "imageText", "segment", "date", "time", "destination"], properties: {
+    required: ["photoId", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"], properties: {
       photoId: { type: "string" }, kind: { type: "string", enum: ["image", "video"] }, title: { type: "string" },
       caption: { type: "string" }, imageText: { type: ["string", "null"] }, segment: { type: "string" },
+      visualInstructions: { type: "string", minLength: 1, maxLength: 1000 },
       date: { type: ["string", "null"] }, time: { type: ["string", "null"] }, destination: { type: "string", enum: ["feed", "story", "both"] }
     } } }
 } };
@@ -43,6 +45,11 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube para preparar publicaçõ
   "Use somente os photoId recebidos. A logo é separada, não invente uma. Não invente preços, ofertas, prêmios, certificações, características, endereços ou fatos. " +
   "Separe o pedido da legenda: 'com autoridade' é tom profissional, nunca uma frase literal para publicar. imageText contém apenas o preço/frase explicitamente autorizado para escrever na arte, até 300 caracteres. " +
   "A legenda final não contém instruções ao programa. segment deve ser o ramo e direção visual curta, até 80 caracteres, sem limitar a alimentação. " +
+  "Em visualInstructions, analise e registre a orientação visual completa de CADA foto, em português, até 1.000 caracteres, separada da legenda e do texto que será escrito na imagem. " +
+  "Leve todas as preferências e restrições do cliente: cores, fundo, enquadramento, estilo, posição/tamanho da logo, elementos a manter/remover e o que não deve mudar. Não reduza o pedido a um rótulo genérico do ramo. " +
+  "Não repita valores ou frases de imageText nas instruções visuais: o campo de texto confirmado é quem determina a escrita exata da arte. " +
+  "Interprete a intenção, não apenas frases exatas: só adicionar logo/preço significa preservar foto, produto e cenário, com acabamento discreto; mais verde orienta a paleta do design, não a cor natural do produto nem uma alteração da marca. " +
+  "Se pedir apenas um ajuste na proposta, mantenha as demais orientações de currentDraft e incorpore o ajuste. Se não houver preferência específica, mantenha o acabamento profissional e limpo habitual da iA4tube. Não invente preferências nem capacidades. " +
   "Imagem é padrão; vídeo somente quando pedido, com 10 segundos. Não ultrapasse as cotas. Distribua as publicações nos próximos 30 dias quando o cliente pedir o mês, " +
   "sugerindo datas futuras e horários de Brasília diferentes. Nunca garanta melhor horário com dados que não temos. Se faltar horário para um item, deixe null para o cliente escolher. " +
   "Feed e Story são padrão (both). A aplicação validará antes da criação. Quando houver items, reply só avisa que estão preparados e orienta tocar em Continuar. Se precisar perguntar algo indispensável antes de uma proposta, retorne items vazio. " +
@@ -139,11 +146,13 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
   function validateItems(items, s, f) {
     if (!Array.isArray(items) || items.length > Math.min(35, f.images + f.videos)) fail("draft_invalid", 400);
     const result = items.map((v, n) => {
-      fields(v, ["photoId", "kind", "title", "caption", "imageText", "segment", "date", "time", "destination"]);
+      fields(v, ["photoId", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"]);
       if (!s.photos.some(p => p.id === v.photoId) || !["image", "video"].includes(v.kind) || !["feed", "story", "both"].includes(v.destination)) fail("draft_invalid", 400);
+      if (v.visualInstructions !== undefined && !text(v.visualInstructions, 1000)) fail("draft_invalid", 400);
       return { id: crypto.randomUUID(), requestId: crypto.randomUUID(), photoId: v.photoId, kind: v.kind, title: text(v.title, 160),
         caption: caption(text(v.caption, 2200)), imageText: v.imageText === null ? null : text(v.imageText, 300),
-        segment: text(v.segment || "auto", 80), date: v.date === null ? null : text(v.date, 10), time: v.time === null ? null : text(v.time, 5), destination: v.destination };
+        segment: text(v.segment || "auto", 80), ...(v.visualInstructions !== undefined ? { visualInstructions: text(v.visualInstructions, 1000) } : {}),
+        date: v.date === null ? null : text(v.date, 10), time: v.time === null ? null : text(v.time, 5), destination: v.destination };
     });
     assertBalances(result, f);
     return result;
@@ -231,7 +240,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         if (!reply) fail("provider_unavailable", 503);
         s = load(owner);
         for (const d of (helpOnly ? [] : out.photoDescriptions) || []) { const p = s.photos.find(p => p.id === d.photoId); if (p && !p.description) p.description = text(d.description, 700); }
-        if (items.length) s.draft = { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, items };
+        if (items.length) s.draft = { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, clientRequest: msg, items };
         else if (discardRequested(msg)) s.draft = null;
         if (items.length) s.assistanceTopic = "creation";
         s.messages.push({ id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] }); s.messages = s.messages.slice(-80);
@@ -276,6 +285,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       fs.writeFileSync(path.join(folder(owner), id + "-logo.png"), logo, { flag: "wx", mode: 0o600 });
       const claimCopy = Object.fromEntries(["whatsapp", "sub", "company_id", "token_version", "iss", "aud", "jti"].map(k => [k, claims[k]]));
       s.campaigns.push({ id, draftId: d.id, draftVersion: d.version, confirmationHash, items, claims: claimCopy,
+        ...(d.clientRequest !== undefined ? { clientRequest: d.clientRequest } : {}),
         afterMessageId: s.messages.at(-1)?.id || "", status: "queued", createdAt: clock() }); s.draft = null; save(owner, s);
       queueMicrotask(() => processPending().catch(() => {})); return { ok: true, campaignId: id, status: "queued" };
     } finally { busy.delete(owner); }
@@ -303,7 +313,9 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       row.caption = caption(text(result.caption, 2200)); row.captionSource = "ia4tube";
       save(owner, s);
     }
+    const notes = creativeNotes(live.clientRequest, row.visualInstructions);
     const data = { schemaVersion: 2, campaignId: "sextou-classico-v1", company: "", whatsapp: null,
+      ...(notes ? { notes } : {}),
       selections: [{ id: "93", format: row.kind }], mediaKind: row.kind, imageCaption: row.caption,
       imageSegment: row.segment, ...(row.imageText ? { imageText: row.imageText } : {}),
       sextou: { businessType: "auto", date: null, copyId: "trabalho-sabor", durationSeconds: 10 },
