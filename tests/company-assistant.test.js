@@ -228,3 +228,67 @@ test("a completed receipt outside the visible history cannot close an unrelated 
   assert.equal((await f.service.state(claims())).campaigns.length,0);
   assert.equal(JSON.parse(fs.readFileSync(file,"utf8")).campaigns[0].status,"sent");assert.equal(f.submissions.length,1);
 });
+
+for (const kind of ["image", "video"]) test(`${kind}: Instagram help preserves the exact draft and its original one-time production confirmation`, async t => {
+  const f=await fixture(t),before=await draft(f,kind),client=structuredClone(f.client);
+  const input={requestId:uuid(),message:"Como conectar meu Instagram?",photoIds:[]};
+  const after=await f.service.message(claims(),input),repeat=await f.service.message(claims(),input);
+  assert.match(after.messages.at(-1).text,/ícone do Instagram.*esquerda/);
+  assert.deepEqual(after.draft,before.draft);assert.deepEqual(repeat.draft,before.draft);
+  assert.equal(after.messagesUsed,before.messagesUsed+1);assert.equal(repeat.messagesUsed,after.messagesUsed);
+  assert.equal(f.providerCalls.length,1);assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+  assert.deepEqual(f.client,client);
+  const body=confirmation(after),receipt=await f.service.confirm(claims(),body);
+  await tick();await f.service.processPending();await tick();
+  assert.equal((await f.service.confirm(claims(),body)).campaignId,receipt.campaignId);
+  assert.equal(f.submissions.length,1);assert.equal(f.submissions[0].data.mediaKind,kind);
+  assert.equal(f.submissions[0].data.imageCaption,before.draft.items[0].caption);
+  assert.equal(f.submissions[0].data.imageText,before.draft.items[0].imageText);
+});
+
+test("known app help works on a fresh conversation without an AI call, media order or media credit change", async t => {
+  const f=await fixture(t),client=structuredClone(f.client);
+  const after=await f.service.message(claims(),{requestId:uuid(),message:"Como conectar o Instagram?",photoIds:[]});
+  assert.equal(after.draft,null);assert.equal(after.messagesUsed,1);assert.equal(f.providerCalls.length,0);
+  assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);assert.deepEqual(f.client,client);
+  const saved=JSON.parse(fs.readFileSync(path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),"utf8"));
+  assert.equal(Object.values(saved.counters)[0].usd,0);assert.equal(Object.values(saved.attempts)[0].usd,0);
+});
+
+test("a general app question cannot replace the pending draft even if the model mistakenly proposes new items", async t => {
+  const f=await fixture(t),before=await draft(f),item=before.draft.items[0];
+  const {id,requestId,...providerItem}=item;
+  f.setOutput({reply:"Preparei outra publicação.",photoDescriptions:[],items:[{...providerItem,imageText:"Texto indevido"}]});
+  const after=await f.service.message(claims(),{requestId:uuid(),message:"Por que meu app está mostrando esse aviso?",photoIds:[]});
+  assert.deepEqual(after.draft,before.draft);assert.match(after.messages.at(-1).text,/qual tela ou mensagem/);
+  const payload=JSON.parse(f.providerCalls.at(-1).body.input[0].content[0].text);
+  assert.equal(payload.requestMode,"app_help");assert.match(f.providerCalls.at(-1).body.instructions,/GUIA DE AJUDA DO APP/);
+  assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+});
+
+test("a conversational reply without items preserves photo identity, schedule and captions until an explicit replacement", async t => {
+  const f=await fixture(t),before=await draft(f);
+  f.setOutput({reply:"Pode explicar o que você quer mudar?",photoDescriptions:[],items:[]});
+  const after=await f.service.message(claims(),{requestId:uuid(),message:"Tenho uma dúvida",photoIds:[]});
+  assert.deepEqual(after.draft,before.draft);assert.equal(f.submissions.length,0);
+  const {id,requestId,...providerItem}=before.draft.items[0];
+  f.setOutput({reply:"Preparei a nova versão.",photoDescriptions:[],items:[{...providerItem,imageText:"R$ 49,90"}]});
+  const changed=await f.service.message(claims(),{requestId:uuid(),message:"Mude o valor para 49,90",photoIds:[]});
+  assert.notEqual(changed.draft.id,before.draft.id);assert.equal(changed.draft.version,before.draft.version+1);
+  assert.equal(changed.draft.items[0].imageText,"R$ 49,90");
+  await assert.rejects(f.service.confirm(claims(),confirmation(before)),{code:"assistant_draft_changed"});
+});
+
+test("asking how to cancel does not discard the proposal or create a calendar order", async t => {
+  const f=await fixture(t),before=await draft(f);
+  f.setOutput({reply:"Para descartar a preparação, diga: Descarte esta proposta.",photoDescriptions:[],items:[]});
+  const after=await f.service.message(claims(),{requestId:uuid(),message:"Como cancelar essa proposta?",photoIds:[]});
+  assert.deepEqual(after.draft,before.draft);assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+});
+
+test("app help retains the existing message and per-minute limits", async t => {
+  const f=await fixture(t);
+  for(let n=0;n<6;n++)await f.service.message(claims(),{requestId:uuid(),message:"Como conectar o Instagram?",photoIds:[]});
+  await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Onde vejo meu login?",photoIds:[]}),{code:"assistant_rate_limit"});
+  assert.equal(f.providerCalls.length,0);assert.equal((await f.service.state(claims())).messagesUsed,6);
+});

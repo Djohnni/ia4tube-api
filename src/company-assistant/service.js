@@ -5,6 +5,7 @@ const { atomicWriteJson } = require("../notifications/fcm-token-store");
 const billing = require("../billing/billing.service");
 const { dateTime, caption } = require("../social/calendar/model");
 const { admissionOrderId } = require("../company-edit-calendar/admission-contract");
+const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -27,7 +28,7 @@ const outputSchema = { type: "object", additionalProperties: false, required: ["
       date: { type: ["string", "null"] }, time: { type: ["string", "null"] }, destination: { type: "string", enum: ["feed", "story", "both"] }
     } } }
 } };
-const INSTRUCTIONS = "Você é o assistente da iA4tube, exclusivamente para preparar publicações das empresas. Fale em português simples, como no WhatsApp. " +
+const INSTRUCTIONS = "Você é o assistente da iA4tube para preparar publicações das empresas e ajudar a usar o app. Fale em português simples, como no WhatsApp. " +
   "reply deve ter uma ou no máximo duas linhas curtas (até 90 caracteres); excepcionalmente três linhas, até 120 caracteres. Sem listas, explicações longas ou várias perguntas. Essa regra vale só para reply, não para as legendas. " +
   "Recebeu foto e o que o cliente quer? Prepare items imediatamente. Não peça confirmações intermediárias. Um valor sem moeda é em reais (BRL); use R$ e vírgula decimal. Nunca pergunte se é em reais. " +
   "CAPACIDADES REAIS: crie imagem OU transforme uma FOTO em vídeo suave de 10 segundos, com música e sem fala, usando o Modo iA4tube já existente. Vídeo usa um crédito de vídeo, não de imagem. A entrada é sempre foto; NUNCA peça um vídeo pronto. Use a foto já enviada se estiver claro qual é; não peça novamente. " +
@@ -44,7 +45,7 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube, exclusivamente para prep
   "Imagem é padrão; vídeo somente quando pedido, com 10 segundos. Não ultrapasse as cotas. Distribua as publicações nos próximos 30 dias quando o cliente pedir o mês, " +
   "sugerindo datas futuras e horários de Brasília diferentes. Nunca garanta melhor horário com dados que não temos. Se faltar horário para um item, deixe null para o cliente escolher. " +
   "Feed e Story são padrão (both). A aplicação validará antes da criação. Quando houver items, reply só avisa que estão preparados e orienta tocar em Continuar. Se precisar perguntar algo indispensável antes de uma proposta, retorne items vazio. " +
-  "Descreva brevemente as novas fotos em photoDescriptions; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial. A marca é exatamente iA4tube.";
+  "Descreva brevemente as novas fotos em photoDescriptions; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial e do uso do app. A marca é exatamente iA4tube. " + HELP_GUIDE;
 
 // Bound the displayed reply without another provider call or touching captions/draft data.
 function conciseReply(value, itemCount = 0) {
@@ -181,11 +182,22 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       if (recent.length >= 6) fail("rate_limit", 429); rates.set(owner, [...recent, clock()]);
       const f = await facts(claims), c = counters(s, f);
       if (c.messages >= f.messages || c.usd + .01 > f.budgetUsd) fail("conversation_limit", 429);
+      const helpOnly = !input.photoIds.length && isHelpQuestion(msg);
+      const helpReply = helpOnly ? simpleHelpReply(msg, f) : null;
+      if (helpReply) {
+        // Answer known app questions without a provider call or changing the pending proposal.
+        c.messages++;
+        s.messages.push({ id: input.requestId, role: "user", text: msg, photoIds: [] },
+          { id: crypto.randomUUID(), role: "assistant", text: helpReply, photoIds: [] });
+        s.messages = s.messages.slice(-80);
+        s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
+        save(owner, s); return wire(s, f);
+      }
       const preferredPhotoIds = input.photoIds.length ? input.photoIds : s.messages.findLast(m => m.role === "user" && m.photoIds?.length)?.photoIds || [];
       const content = [{ type: "input_text", text: JSON.stringify({ today: new Intl.DateTimeFormat("en-CA", {timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(clock())),
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
         images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
-        capabilities: CAPABILITIES,
+        capabilities: CAPABILITIES, requestMode: helpOnly ? "app_help" : "creation_or_conversation",
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),
         preferredPhotoIds,
         photos: s.photos.filter(p => s.photos.slice(-40).includes(p) || preferredPhotoIds.includes(p.id) || s.draft?.items?.some(i => i.photoId === p.id))
@@ -209,11 +221,13 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
             instructions: INSTRUCTIONS, input: [{ role: "user", content }], text: { format: { type: "json_schema", name: "company_assistant", strict: true, schema: outputSchema } } }) });
         const data = await response.json(); if (!response.ok || data.status && data.status !== "completed") fail("provider_unavailable", 503);
         const raw = (data.output || []).flatMap(v => v.content || []).filter(v => v.type === "output_text").map(v => v.text).join("");
-        const out = JSON.parse(raw), items = validateItems(out.items, s, f), reply = conciseReply(out.reply, items.length);
+        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, f);
+        const reply = conciseReply(helpOnly && out.items?.length ? "Me diga qual tela ou mensagem aparece para eu orientar o próximo passo." : out.reply, items.length);
         if (!reply) fail("provider_unavailable", 503);
         s = load(owner);
-        for (const d of out.photoDescriptions || []) { const p = s.photos.find(p => p.id === d.photoId); if (p && !p.description) p.description = text(d.description, 700); }
-        s.draft = items.length ? { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, items } : null;
+        for (const d of (helpOnly ? [] : out.photoDescriptions) || []) { const p = s.photos.find(p => p.id === d.photoId); if (p && !p.description) p.description = text(d.description, 700); }
+        if (items.length) s.draft = { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, items };
+        else if (discardRequested(msg)) s.draft = null;
         s.messages.push({ id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] }); s.messages = s.messages.slice(-80);
         const usage = data.usage || {}, usd = (Number(usage.input_tokens) * .1 + Number(usage.output_tokens) * .5) / 1e6;
         if (!Number.isFinite(usd) || usd < 0 || usd > .05) fail("usage_unconfirmed", 503);
