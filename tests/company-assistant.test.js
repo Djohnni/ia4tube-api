@@ -12,7 +12,7 @@ async function fixture(t, options={}) {
   const png=await sharp({create:{width:100,height:80,channels:3,background:"#ff8800"}}).png().toBuffer();
   const contextCalls=[],submissions=[],providerCalls=[],captionCalls=[];let output={reply:"Envie uma foto para preparar seu mês.",photoDescriptions:[],items:[]};
   const service=createAssistantService({root,clock:()=>NOW,apiKey:"fake-test-key",dispatchSpacingMs:0,
-    readClient:o=>o===OWNER?client:null, profile:{get:()=>({profile:{has_logo:true}}),logo:()=>png},
+    readClient:o=>o===OWNER?client:null, profile:{get:()=>({profile:{has_logo:true,...options.profile}}),logo:()=>png},
     observeConnection:async()=>({state:"connected",health:"healthy"}),
     calendar:{availability:async()=>({availability:{canImage:true,canVideo:true}}),createContext:async(c,v)=>{
       contextCalls.push(v);return {ticket:v.requestId+"."+"T".repeat(43)};
@@ -37,6 +37,12 @@ async function draft(f,kind="image") {
 }
 const confirmation = snapshot => ({draftId:snapshot.draft.id,version:snapshot.draft.version,confirmed:true,items:snapshot.draft.items.map(({id,date,time,destination})=>({id,date,time,destination}))});
 const tick=()=>new Promise(r=>setImmediate(r));
+const stateFile=f=>path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json");
+const providerContext=f=>JSON.parse(f.providerCalls.at(-1).body.input[0].content[0].text);
+const proposal=(photoId,kind="image",imageText="R$ 41,41")=>({reply:"Preparei sua publicação.",
+  photoDescriptions:[{photoId,description:"Hambúrguer fotografado sobre uma mesa."}],items:[{photoId,kind,title:"Oferta atual",
+    caption:"Seu hambúrguer para hoje!",imageText,segment:"Hamburgueria",visualInstructions:"Arte profissional e limpa com a logo da empresa.",
+    date:"2099-01-17",time:"18:05",destination:"both"}]});
 for(const paid of [true,false])test(`${paid?"paid":"trial"} conversation enforces its own message allowance without changing media credits`,async t=>{
   const f=await fixture(t,{free:!paid}),limit=paid?120:20,before=structuredClone(f.client);
   assert.equal((await f.service.state(claims())).messageLimit,limit);
@@ -76,6 +82,88 @@ test("photo instruction becomes a reviewable draft without creating an order",as
   assert.equal(f.providerCalls[0].body.input[0].content.filter(c=>c.type==="input_image").length,1);
   assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
   const id=s.messages.find(m=>m.role==="assistant").id;assert.deepEqual(f.service.report(claims(),{messageId:id}),{ok:true});
+});
+
+for(const kind of ["image","video"])test(`${kind}: a confirmed order cannot supply creative inputs to the next order; company profile remains`,async t=>{
+  const profile={nome:"Empresa permanente",ramo:"Hamburgueria",descricao:"Atendimento no bairro"},f=await fixture(t,{profile});
+  const first=await draft(f),oldPhoto=first.draft.items[0].photoId;
+  let saved=JSON.parse(fs.readFileSync(stateFile(f),"utf8"));
+  saved.messages[0].text="Só adicione a logo e escreva x-tudo 39,32";
+  saved.photos[0].description="X-tudo 39,32";
+  saved.creativeContext.photoDescriptions[oldPhoto]="X-tudo 39,32";
+  saved.draft.items[0].caption="X-tudo 39,32 #XTudo";
+  fs.writeFileSync(stateFile(f),JSON.stringify(saved));
+  const oldConfirmation=confirmation(first);await f.service.confirm(claims(),oldConfirmation);await tick();
+  const newPhoto=uuid();await f.service.upload(claims(),newPhoto,f.png,"atual.png");
+  f.setOutput(proposal(newPhoto,kind));
+  const second=await f.service.message(claims(),{requestId:uuid(),message:"Faça uma arte completa, preço 41,41",photoIds:[newPhoto]});
+  const context=providerContext(f);
+  assert.deepEqual(context.profile,{has_logo:true,...profile});assert.equal(context.hasLogo,true);
+  assert.deepEqual(context.preferredPhotoIds,[newPhoto]);assert.deepEqual(context.photos.map(p=>p.photoId),[newPhoto]);
+  assert.deepEqual(context.recentMessages,[]);assert.deepEqual(context.currentDraft,[]);
+  assert(!JSON.stringify(context).includes("x-tudo"));assert(!JSON.stringify(context).includes("39,32"));
+  assert(!JSON.stringify(context).includes(oldPhoto));
+  assert(second.messages.some(m=>m.text.includes("x-tudo")),"past conversation remains visible");
+  assert.equal(second.draft.items[0].kind,kind);
+  // Repeating the old confirmation cannot clear or reset a newer preparation.
+  await f.service.confirm(claims(),oldConfirmation);
+  assert.equal((await f.service.state(claims())).draft.id,second.draft.id);
+  const body=confirmation(second),receipt=await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();
+  assert.equal((await f.service.confirm(claims(),body)).campaignId,receipt.campaignId);
+  assert.equal(f.submissions.length,2);assert.equal(f.submissions[1].data.mediaKind,kind);
+  assert.equal(f.submissions[1].data.imageText,"R$ 41,41");
+  saved=JSON.parse(fs.readFileSync(stateFile(f),"utf8"));
+  assert.equal(saved.photos.length,2);assert.equal(saved.campaigns.length,2);assert.equal(saved.draft,null);
+  assert.deepEqual(saved.creativeContext.photoIds,[]);
+});
+
+test("after confirmation a request without a photo cannot silently use the old attachment",async t=>{
+  const f=await fixture(t),first=await draft(f);await f.service.confirm(claims(),confirmation(first));await tick();
+  f.setOutput({reply:"Envie a foto para preparar esta publicação.",photoDescriptions:[],items:[]});
+  const state=await f.service.message(claims(),{requestId:uuid(),message:"Crie uma arte nova por 41,41",photoIds:[]});
+  const context=providerContext(f);assert.deepEqual(context.photos,[]);assert.deepEqual(context.preferredPhotoIds,[]);
+  assert.equal(state.draft,null);assert.equal(f.providerCalls.at(-1).body.input[0].content.filter(v=>v.type==="input_image").length,0);
+});
+
+test("explicit reuse of an old photo reanalyzes its bytes without a previous product label",async t=>{
+  const f=await fixture(t),first=await draft(f),photoId=first.draft.items[0].photoId;
+  await f.service.confirm(claims(),confirmation(first));await tick();
+  const saved=JSON.parse(fs.readFileSync(stateFile(f),"utf8"));saved.photos[0].description="X-tudo 39,32";
+  fs.writeFileSync(stateFile(f),JSON.stringify(saved));
+  f.setOutput(proposal(photoId));
+  await f.service.message(claims(),{requestId:uuid(),message:"Nova publicação com esta foto, preço 41,41",photoIds:[photoId]});
+  const context=providerContext(f);assert.equal(context.photos[0].description,"");
+  assert(!JSON.stringify(context).includes("X-tudo"));
+  assert.equal(f.providerCalls.at(-1).body.input[0].content.filter(v=>v.type==="input_image").length,1);
+});
+
+test("a provider cannot select a historical photo that is outside the current preparation",async t=>{
+  const f=await fixture(t),first=await draft(f),oldPhoto=first.draft.items[0].photoId;
+  await f.service.confirm(claims(),confirmation(first));await tick();
+  const current=uuid();await f.service.upload(claims(),current,f.png,"nova.png");f.setOutput(proposal(oldPhoto));
+  await assert.rejects(f.service.message(claims(),{requestId:uuid(),message:"Crie com esta foto",photoIds:[current]}),{code:"assistant_draft_invalid"});
+  assert.equal((await f.service.state(claims())).draft,null);assert.equal(f.submissions.length,1);
+});
+
+test("adjustments within one unconfirmed preparation keep its photo, directions and original draft",async t=>{
+  const f=await fixture(t),photoId=uuid();await f.service.upload(claims(),photoId,f.png,"foto.png");
+  const output=proposal(photoId);output.items[0].visualInstructions="Fundo verde e logo no canto direito.";f.setOutput(output);
+  const first=await f.service.message(claims(),{requestId:uuid(),message:"Quero fundo verde e logo no canto direito, preço 41,41",photoIds:[photoId]});
+  f.setOutput({...output,items:[{...output.items[0],visualInstructions:"Fundo verde e logo no canto esquerdo."}]});
+  await f.service.message(claims(),{requestId:uuid(),message:"Mude só a logo para a esquerda",photoIds:[]});
+  const context=providerContext(f);assert.deepEqual(context.currentDraft,first.draft.items);
+  assert(context.recentMessages.some(m=>m.text.includes("fundo verde")));
+  assert.deepEqual(context.preferredPhotoIds,[photoId]);assert.equal(context.photos[0].description,"Hambúrguer fotografado sobre uma mesa.");
+  assert.equal(f.submissions.length,0);
+});
+
+test("explicitly discarding an unsent preparation closes its creative context without deleting history",async t=>{
+  const f=await fixture(t),first=await draft(f);f.setOutput({reply:"Preparação descartada.",photoDescriptions:[],items:[]});
+  const cleared=await f.service.message(claims(),{requestId:uuid(),message:"Cancele esta proposta",photoIds:[]});
+  assert.equal(cleared.draft,null);assert(cleared.messages.length>=4);
+  await f.service.message(claims(),{requestId:uuid(),message:"Quero uma nova arte",photoIds:[]});
+  assert.deepEqual(providerContext(f).photos,[]);assert.deepEqual(providerContext(f).recentMessages,[]);
+  assert(cleared.photos.some(p=>p.id===first.draft.items[0].photoId));assert.equal(f.submissions.length,0);
 });
 test("confirmed image uses unchanged Modo iA4tube receiver and calendar entry once",async t=>{
   const f=await fixture(t),s=await draft(f),body=confirmation(s),first=await f.service.confirm(claims(),body);

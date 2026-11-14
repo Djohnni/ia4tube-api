@@ -8,6 +8,7 @@ const { admissionOrderId } = require("../company-edit-calendar/admission-contrac
 const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
 const { accountPlan, currentCatalog, resolveProductReply } = require("./knowledge");
 const { creativeNotes } = require("./creative-brief");
+const { ensureCreativeContext, appendContextMessages, contextMessages, closeCreativeContext } = require("./creative-context");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -36,6 +37,8 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube para preparar publicaçõ
   "Recebeu foto e o que o cliente quer? Prepare items imediatamente. Não peça confirmações intermediárias. Um valor sem moeda é em reais (BRL); use R$ e vírgula decimal. Nunca pergunte se é em reais. " +
   "CAPACIDADES REAIS: crie imagem OU transforme uma FOTO em vídeo suave de 10 segundos, com música e sem fala, usando o Modo iA4tube já existente. Vídeo usa um crédito de vídeo, não de imagem. A entrada é sempre foto; NUNCA peça um vídeo pronto. Use a foto já enviada se estiver claro qual é; não peça novamente. " +
   "preferredPhotoIds identifica a seleção atual ou a última foto realmente enviada na conversa. Se o cliente disser última foto/foto que enviei, use essa referência; recentMessages também identifica as fotos de cada mensagem. " +
+  "ISOLAMENTO DOS PEDIDOS: photos, recentMessages e currentDraft pertencem somente à preparação atual, ainda não confirmada. Pedidos confirmados não fornecem nomes, preços, legendas, fotos ou orientações para o próximo. O perfil e a logo da empresa são permanentes. " +
+  "Use o nome comercial do produto apenas se informado nesta preparação ou no perfil. Não deduza nomes como x-tudo ou x-bacon pela aparência: sem nome informado, use uma descrição genérica como hambúrguer, lanche ou produto. " +
   "capabilities e recentOrders são fatos do sistema. Não prometa editar arquivos de vídeo, narrar, pesquisar sites, alterar perfil, publicar diretamente ou executar qualquer recurso não listado. Explique a limitação em uma frase curta e ofereça só a alternativa suportada. Respostas antigas podem conter erros: corrija-as com base nas capacidades atuais. " +
   "Se pedirem arquivo de vídeo como entrada, narração ou duração diferente de 10s, avise que não há esse recurso neste caminho e ofereça vídeo suave de 10s a partir de foto, sem iniciar uma proposta diferente sem o cliente aceitar. " +
   "Você prepara PROPOSTAS. Nunca diga que uma arte/vídeo já foi criado, recebido, agendado ou publicado: essas ações só ocorrem após a confirmação e o recibo real. Pedido sent significa apenas recebido pela produção, não arte pronta nem publicação concluída. " +
@@ -53,7 +56,7 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube para preparar publicaçõ
   "Imagem é padrão; vídeo somente quando pedido, com 10 segundos. Não ultrapasse as cotas. Distribua as publicações nos próximos 30 dias quando o cliente pedir o mês, " +
   "sugerindo datas futuras e horários de Brasília diferentes. Nunca garanta melhor horário com dados que não temos. Se faltar horário para um item, deixe null para o cliente escolher. " +
   "Feed e Story são padrão (both). A aplicação validará antes da criação. Quando houver items, reply só avisa que estão preparados e orienta tocar em Continuar. Se precisar perguntar algo indispensável antes de uma proposta, retorne items vazio. " +
-  "Descreva brevemente as novas fotos em photoDescriptions; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial e do uso do app. A marca é exatamente iA4tube. " + HELP_GUIDE;
+  "Descreva brevemente as novas fotos em photoDescriptions, de forma visual e neutra, sem nomes comerciais ou preços; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial e do uso do app. A marca é exatamente iA4tube. " + HELP_GUIDE;
 
 // Bound the displayed reply without another provider call or touching captions/draft data.
 function conciseReply(value, itemCount = 0) {
@@ -143,11 +146,11 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     } finally { busy.delete(owner); }
   }
   function photo(claims, id) { const owner = account(claims); if (!UUID.test(id) || !load(owner).photos.some(p => p.id === id)) fail("photo_not_found", 404); return fs.readFileSync(path.join(folder(owner), id + ".png")); }
-  function validateItems(items, s, f) {
+  function validateItems(items, s, f, allowedPhotoIds) {
     if (!Array.isArray(items) || items.length > Math.min(35, f.images + f.videos)) fail("draft_invalid", 400);
     const result = items.map((v, n) => {
       fields(v, ["photoId", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"]);
-      if (!s.photos.some(p => p.id === v.photoId) || !["image", "video"].includes(v.kind) || !["feed", "story", "both"].includes(v.destination)) fail("draft_invalid", 400);
+      if (!allowedPhotoIds.has(v.photoId) || !s.photos.some(p => p.id === v.photoId) || !["image", "video"].includes(v.kind) || !["feed", "story", "both"].includes(v.destination)) fail("draft_invalid", 400);
       if (v.visualInstructions !== undefined && !text(v.visualInstructions, 1000)) fail("draft_invalid", 400);
       return { id: crypto.randomUUID(), requestId: crypto.randomUUID(), photoId: v.photoId, kind: v.kind, title: text(v.title, 160),
         caption: caption(text(v.caption, 2200)), imageText: v.imageText === null ? null : text(v.imageText, 300),
@@ -178,11 +181,11 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     try {
       let s = load(owner); const prior = s.attempts[input.requestId];
       if (prior) { if (prior.fingerprint !== fingerprint) fail("request_conflict"); if (prior.state !== "completed") fail("attempt_preserved"); return wire(s, await facts(claims)); }
+      const creativeContext = ensureCreativeContext(s);
       // A short acknowledgement preserves the existing draft. It never authorizes production.
       if (s.draft?.items?.length && !input.photoIds.length && scheduleConfirmation(msg)) {
-        s.messages.push({ id: input.requestId, role: "user", text: msg, photoIds: [] },
+        appendContextMessages(s, { id: input.requestId, role: "user", text: msg, photoIds: [] },
           { id: crypto.randomUUID(), role: "assistant", text: "Toque em Continuar para escolher o dia e a hora.", photoIds: [] });
-        s.messages = s.messages.slice(-80);
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
         save(owner, s); return wire(s, await facts(claims));
       }
@@ -199,14 +202,14 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       if (helpReply) {
         // Answer known app questions without a provider call or changing the pending proposal.
         c.messages++;
-        s.messages.push({ id: input.requestId, role: "user", text: msg, photoIds: [] },
+        appendContextMessages(s, { id: input.requestId, role: "user", text: msg, photoIds: [] },
           { id: crypto.randomUUID(), role: "assistant", text: helpReply, photoIds: [] });
-        s.messages = s.messages.slice(-80);
         s.assistanceTopic = productReply?.topic || (/instagram|insta/i.test(msg) ? "connection" : s.assistanceTopic || "app_help");
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
         save(owner, s); return wire(s, f);
       }
-      const preferredPhotoIds = input.photoIds.length ? input.photoIds : s.messages.findLast(m => m.role === "user" && m.photoIds?.length)?.photoIds || [];
+      const preferredPhotoIds = input.photoIds.length ? input.photoIds : creativeContext.lastPhotoIds.length ? creativeContext.lastPhotoIds : s.draft?.items?.map(i => i.photoId) || [];
+      const allowedPhotoIds = new Set([...creativeContext.photoIds, ...input.photoIds]);
       const content = [{ type: "input_text", text: JSON.stringify({ today: new Intl.DateTimeFormat("en-CA", {timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(clock())),
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
         images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
@@ -214,20 +217,20 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         conversationTopic: s.assistanceTopic || null, currentCatalog: currentCatalog(), plan: f.plan, trialImages: f.trialImages,
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),
         preferredPhotoIds,
-        photos: s.photos.filter(p => s.photos.slice(-40).includes(p) || preferredPhotoIds.includes(p.id) || s.draft?.items?.some(i => i.photoId === p.id))
-          .map(p => ({ photoId: p.id, description: p.description, name: p.name })),
-        recentMessages: s.messages.slice(-6).map(m => ({ role: m.role, text: m.text.slice(0, 650), photoIds: m.photoIds || [] })),
+        photos: s.photos.filter(p => allowedPhotoIds.has(p.id))
+          .map(p => ({ photoId: p.id, description: creativeContext.photoDescriptions[p.id] || "", name: p.name })),
+        recentMessages: contextMessages(s).slice(-6).map(m => ({ role: m.role, text: m.text.slice(0, 650), photoIds: m.photoIds || [] })),
         currentDraft: s.draft?.items || [], customerMessage: msg, selectedPhotos: input.photoIds }) }];
       if (Buffer.byteLength(content[0].text) > 40000) fail("context_limit", 413);
       for (const id of preferredPhotoIds) {
-        const p = s.photos.find(p => p.id === id); if (p.description) continue;
+        if (creativeContext.photoDescriptions[id]) continue;
         const b = await sharp(fs.readFileSync(path.join(folder(owner), id + ".png"))).resize(768, 768, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 78 }).toBuffer();
         content.push({ type: "input_text", text: "Nova foto photoId=" + id });
         content.push({ type: "input_image", image_url: "data:image/jpeg;base64," + b.toString("base64"), detail: "low" });
       }
       c.messages++; c.usd += .01;
       s.attempts[input.requestId] = { fingerprint, state: "requested", at: clock() };
-      s.messages.push({ id: input.requestId, role: "user", text: msg || "Foto enviada", photoIds: input.photoIds }); save(owner, s);
+      appendContextMessages(s, { id: input.requestId, role: "user", text: msg || "Foto enviada", photoIds: input.photoIds }); save(owner, s);
       try {
         const response = await fetchImpl("https://api.openai.com/v1/responses", { method: "POST", redirect: "error", signal: AbortSignal.timeout(90000),
           headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
@@ -235,15 +238,20 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
             instructions: INSTRUCTIONS, input: [{ role: "user", content }], text: { format: { type: "json_schema", name: "company_assistant", strict: true, schema: outputSchema } } }) });
         const data = await response.json(); if (!response.ok || data.status && data.status !== "completed") fail("provider_unavailable", 503);
         const raw = (data.output || []).flatMap(v => v.content || []).filter(v => v.type === "output_text").map(v => v.text).join("");
-        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, f);
+        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, f, allowedPhotoIds);
         const reply = conciseReply(helpOnly && out.items?.length ? "Me diga qual tela ou mensagem aparece para eu orientar o próximo passo." : out.reply, items.length);
         if (!reply) fail("provider_unavailable", 503);
         s = load(owner);
-        for (const d of (helpOnly ? [] : out.photoDescriptions) || []) { const p = s.photos.find(p => p.id === d.photoId); if (p && !p.description) p.description = text(d.description, 700); }
+        const liveContext = ensureCreativeContext(s);
+        if (liveContext.id !== creativeContext.id) fail("draft_changed");
+        for (const d of (helpOnly ? [] : out.photoDescriptions) || []) {
+          if (allowedPhotoIds.has(d.photoId) && !liveContext.photoDescriptions[d.photoId]) liveContext.photoDescriptions[d.photoId] = text(d.description, 700);
+        }
         if (items.length) s.draft = { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, clientRequest: msg, items };
         else if (discardRequested(msg)) s.draft = null;
         if (items.length) s.assistanceTopic = "creation";
-        s.messages.push({ id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] }); s.messages = s.messages.slice(-80);
+        appendContextMessages(s, { id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] });
+        if (!items.length && discardRequested(msg)) closeCreativeContext(s, input.requestId);
         const usage = data.usage || {}, usd = (Number(usage.input_tokens) * .1 + Number(usage.output_tokens) * .5) / 1e6;
         if (!Number.isFinite(usd) || usd < 0 || usd > .05) fail("usage_unconfirmed", 503);
         counters(s, f).usd += usd - .01;
@@ -286,7 +294,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       const claimCopy = Object.fromEntries(["whatsapp", "sub", "company_id", "token_version", "iss", "aud", "jti"].map(k => [k, claims[k]]));
       s.campaigns.push({ id, draftId: d.id, draftVersion: d.version, confirmationHash, items, claims: claimCopy,
         ...(d.clientRequest !== undefined ? { clientRequest: d.clientRequest } : {}),
-        afterMessageId: s.messages.at(-1)?.id || "", status: "queued", createdAt: clock() }); s.draft = null; save(owner, s);
+        afterMessageId: s.messages.at(-1)?.id || "", status: "queued", createdAt: clock() }); s.draft = null;
+      closeCreativeContext(s, id); save(owner, s);
       queueMicrotask(() => processPending().catch(() => {})); return { ok: true, campaignId: id, status: "queued" };
     } finally { busy.delete(owner); }
   }
