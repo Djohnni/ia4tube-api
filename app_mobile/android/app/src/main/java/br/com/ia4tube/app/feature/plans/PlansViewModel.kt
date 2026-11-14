@@ -36,6 +36,10 @@ class PlansViewModel(
         }
     }
 
+    fun comprarStories() {
+        startPixAction("stories_avulsos") { repository.criarStoriesPix() }
+    }
+
     fun assinarPlano(planId: String) {
         startPixAction(planId) {
             repository.criarPlanoPix(planId)

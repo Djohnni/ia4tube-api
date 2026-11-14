@@ -39,6 +39,7 @@ data class MeResponse(
     val carrosseisRestantes: Int? = null,
     val carrosseisCiclo: String? = null,
     val quotaVersion: Int = 0,
+    val storiesAvulsosRestantes: Int = 0,
     val videosMensaisRestantes: Int = 0
 )
 

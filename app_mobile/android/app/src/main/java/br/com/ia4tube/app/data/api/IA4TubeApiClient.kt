@@ -220,6 +220,7 @@ class IA4TubeApiClient(
                 carrosseisRestantes = json.optionalInt("carrosseis_restantes"),
                 carrosseisCiclo = json.optionalString("carrosseis_ciclo"),
                 quotaVersion = json.optInt("quotaVersion", 0),
+                storiesAvulsosRestantes = json.optInt("stories_avulsos_restantes", 0).coerceAtLeast(0),
                 videosMensaisRestantes = json.optJSONObject("videoQuota")?.optInt("remaining", 0)?.coerceAtLeast(0) ?: 0
             )
         }
@@ -821,6 +822,12 @@ class IA4TubeApiClient(
             .post(bodyJson.toString().toRequestBody(JSON))
             .build()
 
+        executeJson(request) { json -> billingPixFromJson(json) }
+    }
+
+    suspend fun criarStoriesPix(token: String): ApiResult<BillingPixResult> = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url("${AppConfig.apiBase}/billing/stories/pix")
+            .header("Authorization", "Bearer $token").post(ByteArray(0).toRequestBody(null)).build()
         executeJson(request) { json -> billingPixFromJson(json) }
     }
 

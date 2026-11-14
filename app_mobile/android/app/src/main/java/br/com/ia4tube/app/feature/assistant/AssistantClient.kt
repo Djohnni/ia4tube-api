@@ -22,7 +22,7 @@ internal data class AssistantDraft(val id: String, val version: Int, val items: 
 internal data class AssistantCampaign(val id: String, val status: String, val sent: Int, val total: Int, val afterMessageId: String = "")
 internal data class AssistantSnapshot(val messages: List<AssistantMessage>, val draft: AssistantDraft?,
     val campaigns: List<AssistantCampaign>, val images: Int, val videos: Int, val connected: Boolean,
-    val hasLogo: Boolean, val used: Int, val limit: Int, val budgetReached: Boolean, val businessType: String = "")
+    val hasLogo: Boolean, val used: Int, val limit: Int, val budgetReached: Boolean, val businessType: String = "", val storyImages: Int = 0)
 internal class AssistantException(val code: String) : Exception(code)
 
 internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).map { getJSONObject(it) }
@@ -36,7 +36,7 @@ internal fun parseAssistantSnapshot(j: JSONObject): AssistantSnapshot {
         val photos=m.optJSONArray("photoIds") ?: JSONArray()
         AssistantMessage(m.getString("id"),m.getString("role"),m.getString("text"),(0 until photos.length()).map { photos.getString(it) })
     }.orEmpty(),draft,j.optJSONArray("campaigns")?.objects()?.map { AssistantCampaign(it.getString("id"),it.getString("status"),it.getInt("sent"),it.getInt("total"),it.optString("afterMessageId")) }.orEmpty(),
-        j.optInt("images"),j.optInt("videos"),j.optBoolean("connected"),j.optBoolean("hasLogo"),j.optInt("messagesUsed"),j.optInt("messageLimit",20),j.optBoolean("budgetReached"),j.optString("businessType"))
+        j.optInt("images"),j.optInt("videos"),j.optBoolean("connected"),j.optBoolean("hasLogo"),j.optInt("messagesUsed"),j.optInt("messageLimit",20),j.optBoolean("budgetReached"),j.optString("businessType"),j.optInt("storyImages",0).coerceAtLeast(0))
 }
 
 internal class AssistantClient {

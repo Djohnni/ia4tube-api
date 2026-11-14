@@ -54,8 +54,19 @@ class ComboVisualTest {
             h.assertTextFits()
         }
     }
+    @Test fun storyPackageRequiresExplicitConfirmationAndNeverStartsOnPageOpen() {
+        Harness().use { h ->
+            assertTrue(h.events.isEmpty())
+            assertTrue(h.label(h.tag("story_package")).contains("R$ 19,90"))
+            assertTrue(h.label(h.tag("story_package")).contains("sem mensalidade"))
+            h.capture("combo112-story-package.png")
+            h.click("story_package_buy"); assertTrue(h.events.isEmpty())
+            h.click("story_package_confirm"); assertEquals(listOf("stories"),h.events)
+        }
+    }
     @Test fun busyStateDisablesEveryPurchaseButtonWithoutStartingAnyWork() {
         Harness(state=PlansUiState(loadingAction=mediaCombos[1].id)).use { h ->
+            assertNotNull(h.tag("story_package_buy").config.getOrNull(SemanticsProperties.Disabled))
             for(offer in mediaCombos) assertNotNull(h.tag("combo_choose_${offer.id}").config.getOrNull(SemanticsProperties.Disabled))
             assertTrue(h.events.isEmpty())
         }
@@ -79,7 +90,7 @@ class ComboVisualTest {
             ShadowChoreographer.setPaused(true);ShadowChoreographer.setFrameDelay(Duration.ofMillis(16))
             activity.setTheme(android.R.style.Theme_Material_NoActionBar);controller.setup()
             activity.setContent { IA4TubeTheme { CompositionLocalProvider(LocalDensity provides Density(2f,fontScale)) {
-                ComboPlansContent(state,premiumHomePalette(theme),{events+="back"},{events+=it})
+                ComboPlansContent(state,premiumHomePalette(theme),{events+="back"},{events+=it},{events+="stories"})
             } } }
             settle()
         }

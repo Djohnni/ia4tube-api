@@ -33,6 +33,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,13 +61,13 @@ fun PlansScreen(viewModel: PlansViewModel, onBack: () -> Unit,
     palette: PremiumHomePalette = premiumHomePalette(PremiumHomeTheme.Black)) {
     val state by viewModel.uiState.collectAsState()
     state.pix?.let { PixPaymentDialog(pix = it, onDismiss = viewModel::clearPix) }
-    ComboPlansContent(state, palette, onBack, viewModel::assinarPlano)
+    ComboPlansContent(state, palette, onBack, viewModel::assinarPlano, viewModel::comprarStories)
 }
 
 /** Lightweight native presentation; reuses the existing Pix callback and the Home palette. */
 @Composable
 internal fun ComboPlansContent(state: PlansUiState, palette: PremiumHomePalette,
-    onBack: () -> Unit, onChoose: (String) -> Unit) {
+    onBack: () -> Unit, onChoose: (String) -> Unit, onStories: () -> Unit = {}) {
     ScreenScaffold(containerColor = palette.screenBackground) {
         Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
             palette.panelGradient.first(), palette.screenBackground, palette.screenBackground
@@ -77,7 +79,7 @@ internal fun ComboPlansContent(state: PlansUiState, palette: PremiumHomePalette,
                 }
                 Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text("Combos", color = palette.textPrimary, fontSize = 25.sp, lineHeight = 31.sp, fontWeight = FontWeight.Bold)
-                    Text("Escolha seu plano mensal", color = palette.textSecondary, fontSize = 13.sp, lineHeight = 19.sp)
+                    Text("Escolha como quer começar", color = palette.textSecondary, fontSize = 13.sp, lineHeight = 19.sp)
                 }
             }
             if (state.errorMessage.isNotBlank()) {
@@ -85,11 +87,38 @@ internal fun ComboPlansContent(state: PlansUiState, palette: PremiumHomePalette,
                     modifier = Modifier.fillMaxWidth().background(palette.cameraBackground, RoundedCornerShape(14.dp))
                         .border(1.dp, palette.panelBorder, RoundedCornerShape(14.dp)).padding(14.dp).testTag("combo_error"))
             }
+            StoryPackageCard(state.loadingAction, palette, onStories)
+            Text("Planos mensais", color = palette.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             mediaCombos.forEach { offer ->
                 ComboOfferCard(offer, state.loadingAction, palette, onChoose)
             }
             Text("Conecte seu Instagram e escolha data e horário.", color = palette.textSecondary, fontSize = 12.sp, lineHeight = 18.sp,
                 modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 2.dp, bottom = 16.dp))
+        }
+    }
+}
+
+@Composable
+private fun StoryPackageCard(loadingAction: String, palette: PremiumHomePalette, onBuy: () -> Unit) {
+    var confirming by remember { mutableStateOf(false) }
+    if (confirming) AlertDialog(onDismissRequest = { confirming = false },
+        title = { Text("5 Stories por R$ 19,90") },
+        text = { Text("5 imagens para publicar nos Stories. Compra única, sem mensalidade.") },
+        confirmButton = { TextButton(modifier = Modifier.testTag("story_package_confirm"), onClick = { confirming = false; onBuy() }) { Text("Gerar Pix") } },
+        dismissButton = { TextButton(onClick = { confirming = false }) { Text("Voltar") } })
+    val shape = RoundedCornerShape(22.dp)
+    Column(Modifier.fillMaxWidth().background(palette.cameraBackground, shape)
+        .border(1.dp, palette.primaryBorder.copy(alpha = 0.5f), shape).padding(18.dp).testTag("story_package"),
+        verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Text("5 Stories", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Text("5 imagens + postagem automática nos Stories", color = palette.textSecondary, fontSize = 14.sp)
+        Text("R$ 19,90", color = palette.primaryBorder, fontSize = 29.sp, fontWeight = FontWeight.ExtraBold)
+        Text("Pacote avulso · sem mensalidade", color = palette.textSecondary, fontSize = 12.sp)
+        Button(onClick = { confirming = true }, enabled = loadingAction.isBlank(),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("story_package_buy"),
+            colors = ButtonDefaults.buttonColors(containerColor = palette.primaryBorder, contentColor = Color(0xFF21170A))) {
+            if (loadingAction == "stories_avulsos") CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp)
+            else Text("Comprar pacote", fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -160,6 +189,7 @@ private fun PixPaymentDialog(
         decodeQrCodeBase64(pix.qrCodeBase64)
     }
     val title = when {
+        pix.tipo == "stories_pack_pix" -> "Pix do pacote 5 Stories"
         pix.planName.isNotBlank() -> "Pix do combo ${pix.planName}"
         pix.tipo == "arte_avulsa_pix" || pix.purchaseId.isNotBlank() -> "Pix da arte avulsa"
         else -> "Pix para adicionar saldo"

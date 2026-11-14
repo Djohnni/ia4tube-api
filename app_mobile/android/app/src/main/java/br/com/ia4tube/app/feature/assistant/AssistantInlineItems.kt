@@ -29,7 +29,7 @@ import java.time.format.DateTimeFormatter
 /** One source photo stays attached to its own editable publication, never a positional wizard. */
 @Composable
 internal fun AssistantInlineItems(draft:AssistantDraft,palette:PremiumHomePalette,busy:Boolean,
-    onEdit:(AssistantItem)->Unit,loadPhoto:suspend(String)->ByteArray?) {
+    onEdit:(AssistantItem)->Unit,loadPhoto:suspend(String)->ByteArray?, storyOnly:Boolean = false) {
     draft.items.forEachIndexed { index,item -> key(draft.id,item.id) {
         val context=LocalContext.current
         val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null,item.photoId) {
@@ -70,14 +70,14 @@ internal fun AssistantInlineItems(draft:AssistantDraft,palette:PremiumHomePalett
                 }
             }
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                InlineChoice(if(item.kind=="video")"Reels"else"Feed",item.destination!="story",!busy,palette,Modifier.weight(1f)
+                InlineChoice(if(item.kind=="video")"Reels"else"Feed",item.destination!="story",!busy&&!storyOnly,palette,Modifier.weight(1f)
                     .testTag("assistant_item_feed_${item.id}")) { onEdit(item.copy(destination=assistantToggleDestination(item.destination,false))) }
-                InlineChoice("Story",item.destination!="feed",!busy,palette,Modifier.weight(1f)
+                InlineChoice("Story",item.destination!="feed",!busy&&!storyOnly,palette,Modifier.weight(1f)
                     .testTag("assistant_item_story_${item.id}")) { onEdit(item.copy(destination=assistantToggleDestination(item.destination,true))) }
             }
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 InlineChoice("Imagem",item.kind=="image",!busy,palette,Modifier.weight(1f).testTag("assistant_item_image_${item.id}")) { onEdit(item.copy(kind="image")) }
-                InlineChoice("Vídeo · 10s",item.kind=="video",!busy,palette,Modifier.weight(1f).testTag("assistant_item_video_${item.id}")) { onEdit(item.copy(kind="video")) }
+                InlineChoice("Vídeo · 10s",item.kind=="video",!busy&&!storyOnly,palette,Modifier.weight(1f).testTag("assistant_item_video_${item.id}")) { onEdit(item.copy(kind="video")) }
             }
             if(!assistantItemReady(item))Text("Escolha dia e horário futuros · Brasília",fontSize=11.sp,color=palette.textSecondary)
         }

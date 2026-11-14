@@ -237,6 +237,12 @@ class AuthRepository(
         return apiClient.criarArteAvulsaPix(token, quantidade)
     }
 
+    suspend fun criarStoriesPix(): ApiResult<BillingPixResult> {
+        val token = sessionStore.getToken()
+        if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)
+        return apiClient.criarStoriesPix(token)
+    }
+
     suspend fun criarPlanoPix(planId: String): ApiResult<BillingPixResult> {
         val token = sessionStore.getToken()
         if (token.isBlank()) return ApiResult.Failure(SESSION_EXPIRED_MESSAGE)

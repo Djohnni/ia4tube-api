@@ -229,11 +229,19 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
     val availability: EditAvailabilityViewModel = viewModel()
     val session = remember { SessionStore(context.applicationContext) }
     val binding = remember { Any() }
+    var storyOnly by remember(calendar.nonce) { mutableStateOf(false) }
 
     LaunchedEffect(calendar, calendar.nonce) {
         val token = session.getToken()
         calendar.synchronizeSession(token)
         availability.refresh(token, calendar.nonce)
+    }
+    LaunchedEffect(calendar.nonce) {
+        val token = session.getToken()
+        val result = br.com.ia4tube.app.data.api.IA4TubeApiClient().me(token)
+        storyOnly = (result as? br.com.ia4tube.app.data.models.ApiResult.Success<br.com.ia4tube.app.data.models.MeResponse>)?.value?.let {
+            it.storiesAvulsosRestantes > 0 && it.artesMensaisRestantes + it.artesAvulsasRestantes <= 0
+        } ?: false
     }
     LaunchedEffect(binding) {
         browser.deferredAvailabilityRequest?.let { (target, document, mainFrame) ->
@@ -459,6 +467,7 @@ fun EditScreen(onBackClick: () -> Unit, onAuthRequired: () -> Unit = {}, onOpenP
     if (calendar.choosingSchedule) {
         val suggestionCategory = remember(calendar.nonce) { editPostingTimeCategory(businessType()) }
         EditCalendarScheduleDialog(calendar.schedule, suggestionCategory, onDismiss = calendar::cancelSchedule,
+            storyOnly = storyOnly && calendar.mediaKind == "image",
             mediaKind = calendar.mediaKind, showDestinations = calendar.showDestinations, destinationError = calendar.destinationError,
             onConfirm = { calendar.chooseSchedule(it, session.getToken()) })
     }
@@ -469,6 +478,7 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     onDismiss: () -> Unit,
     mediaKind: String? = null,
     showDestinations: Boolean = true,
+    storyOnly: Boolean = false,
     destinationError: String? = null,
     sending: Boolean = false,
     statusMessage: String? = null,
@@ -480,7 +490,7 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
     val default = remember { ZonedDateTime.now(ZoneId.of("America/Sao_Paulo")).plusHours(1).withSecond(0).withNano(0) }
     var date by remember { mutableStateOf(initial?.let { LocalDate.parse(it.date) } ?: default.toLocalDate()) }
     var time by remember { mutableStateOf(initial?.let { LocalTime.parse(it.time) } ?: default.toLocalTime()) }
-    var destination by remember { mutableStateOf(initial?.destination?.takeIf { it in setOf("feed", "story", "both") } ?: "both") }
+    var destination by remember { mutableStateOf(if (storyOnly) "story" else initial?.destination?.takeIf { it in setOf("feed", "story", "both") } ?: "both") }
     val selection = EditCalendarSchedule(date.toString(), time.format(DateTimeFormatter.ofPattern("HH:mm")),
         if (showDestinations) destination else "reel")
     val future = selection.isFuture()
@@ -517,14 +527,15 @@ internal fun EditCalendarScheduleDialog(initial: EditCalendarSchedule?, suggesti
             if (showDestinations) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     EditPlacementChoice(when (mediaKind) { "image" -> "Feed"; "video" -> "Reels"; else -> "Feed/Reels" },
-                        destination != "story", destination != "feed" && !sending, Modifier.weight(1f)) { checked ->
+                        destination != "story", !storyOnly && destination != "feed" && !sending, Modifier.weight(1f)) { checked ->
                         destination = if (checked) "both" else "story"
                     }
-                    EditPlacementChoice("Story", destination != "feed", destination != "story" && !sending, Modifier.weight(1f)) { checked ->
+                    EditPlacementChoice("Story", destination != "feed", !storyOnly && destination != "story" && !sending, Modifier.weight(1f)) { checked ->
                         destination = if (checked) "both" else "feed"
                     }
                 }
             }
+            if (storyOnly) Text("Seu pacote é exclusivo para imagens nos Stories.", color = appearance.secondary, style = MaterialTheme.typography.bodySmall)
             if (destinationError != null) Text(destinationError, style = MaterialTheme.typography.bodySmall, color = appearance.error)
             if (statusMessage != null) Text(statusMessage, style = MaterialTheme.typography.bodySmall, color = appearance.error)
             Text("Sugestão de horário para você baseado no seu negócio", style = MaterialTheme.typography.bodyMedium)

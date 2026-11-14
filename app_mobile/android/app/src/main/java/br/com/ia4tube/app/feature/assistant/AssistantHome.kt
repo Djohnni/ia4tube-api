@@ -129,7 +129,8 @@ internal fun AssistantContent(state:AssistantUiState,palette:PremiumHomePalette,
         }
         snapshot?.draft?.let { draft ->
             Column(Modifier.fillMaxWidth().onGloballyPositioned{draftTop=it.positionInParent().y.toInt()},verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            AssistantInlineItems(draft,palette,state.busy||state.retryPending,onEditItem,loadPhoto)
+            AssistantInlineItems(draft,palette,state.busy||state.retryPending,onEditItem,loadPhoto,
+                storyOnly=snapshot.storyImages>0 && snapshot.images-snapshot.storyImages<=0 && snapshot.videos<=0)
             val enough=draft.items.count{it.kind=="image"}<=snapshot.images&&draft.items.count{it.kind=="video"}<=snapshot.videos
             if(!enough)Text("Seu saldo não permite essa quantidade nesse formato.",color=palette.textSecondary,fontSize=12.sp)
             OutlinedButton(onClick={onReview()},enabled=!state.busy&&!state.retryPending&&enough&&draft.items.all(::assistantItemReady),modifier=Modifier.fillMaxWidth().testTag("assistant_confirm_items"),border=BorderStroke(1.dp,palette.primaryBorder)){
