@@ -287,6 +287,22 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       const result = await calendar.createContext(campaign.claims, { requestId: row.requestId, date: row.date, time: row.time, destination: row.destination, caption: row.caption }, { assistantTrial: true, requireCalendar: true });
       row.ticket = result.ticket; save(owner, s);
     }
+    if (!row.caption.trim()) {
+      // Use the same journaled caption operation as My Images, before receiver admission.
+      // Its existing requestId/ticket prevents another paid caption on an uncertain retry.
+      if (typeof calendar.generateImageCaption !== "function") fail("caption_preserved");
+      let result;
+      try {
+        result = await calendar.generateImageCaption({ ticket: row.ticket, requestId: row.requestId,
+          guidance: row.imageText ? "Informação autorizada para a publicação: " + row.imageText : "",
+          ...(row.kind === "video" ? { mediaKind: "video" } : {}) },
+        { path: path.join(folder(owner), row.photoId + ".png"), mimetype: "image/png" });
+      } catch { fail("caption_preserved"); }
+      if (result?.ok !== true || result.requestId !== row.requestId || typeof result.caption !== "string" || !result.caption.trim())
+        fail("caption_preserved");
+      row.caption = caption(text(result.caption, 2200)); row.captionSource = "ia4tube";
+      save(owner, s);
+    }
     const data = { schemaVersion: 2, campaignId: "sextou-classico-v1", company: "", whatsapp: null,
       selections: [{ id: "93", format: row.kind }], mediaKind: row.kind, imageCaption: row.caption,
       imageSegment: row.segment, ...(row.imageText ? { imageText: row.imageText } : {}),

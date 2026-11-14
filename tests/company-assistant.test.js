@@ -10,12 +10,15 @@ async function fixture(t, options={}) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"i4-assistant-")), client={ativo:true};
   if(!options.free)billing.applyManualPlanPayment(client,plans.getPlan("i4_combo_20i_15v_v1"),{paymentId:"test",paidAt:"2099-01-15T12:00:00Z"});
   const png=await sharp({create:{width:100,height:80,channels:3,background:"#ff8800"}}).png().toBuffer();
-  const contextCalls=[],submissions=[],providerCalls=[];let output={reply:"Envie uma foto para preparar seu mês.",photoDescriptions:[],items:[]};
+  const contextCalls=[],submissions=[],providerCalls=[],captionCalls=[];let output={reply:"Envie uma foto para preparar seu mês.",photoDescriptions:[],items:[]};
   const service=createAssistantService({root,clock:()=>NOW,apiKey:"fake-test-key",dispatchSpacingMs:0,
     readClient:o=>o===OWNER?client:null, profile:{get:()=>({profile:{has_logo:true}}),logo:()=>png},
     observeConnection:async()=>({state:"connected",health:"healthy"}),
     calendar:{availability:async()=>({availability:{canImage:true,canVideo:true}}),createContext:async(c,v)=>{
       contextCalls.push(v);return {ticket:v.requestId+"."+"T".repeat(43)};
+    },generateImageCaption:async(input,file)=>{
+      captionCalls.push({input,file});if(options.captionFailure)throw Error("uncertain_caption");
+      return {ok:true,requestId:input.requestId,caption:options.blankCaption?"":"Confira esta oferta por R$ 39,90!"};
     }},
     fetchImpl:async(url,opt)=>{providerCalls.push({url,body:JSON.parse(opt.body)});if(options.providerFailure)throw Error("network");
       return {ok:true,json:async()=>({status:"completed",usage:{input_tokens:1000,output_tokens:200},output:[{content:[{type:"output_text",text:JSON.stringify(output)}]}]})};},
@@ -24,7 +27,7 @@ async function fixture(t, options={}) {
       return {ok:true,json:async()=>({status:"awaiting_authorization",totalCents:0,orderId:options.badReceipt?uuid():id,admission:{schemaVersion:1,admissionId:uuid(),requestHash:hash("request"),contextHash:hash(data.appCalendar.ticket),mediaKind:data.mediaKind,quantity:1,state:"reserved",reservedAt:NOW,editOrderId:id,planningId:"pm_edit_"+context,pedidoId:"edit_"+context}})};
     }});
   t.after(()=>{service.close();fs.rmSync(root,{recursive:true,force:true});});
-  return {service,root,png,client,contextCalls,submissions,providerCalls,setOutput:o=>{output=o;}};
+  return {service,root,png,client,contextCalls,submissions,providerCalls,captionCalls,setOutput:o=>{output=o;}};
 }
 async function draft(f,kind="image") {
   const id=uuid();await f.service.upload(claims(),id,f.png,"foto.png");
@@ -318,4 +321,47 @@ test("unknown app questions receive the catalog and account facts without changi
   assert.equal(payload.plan.active,true);assert.equal(payload.plan.name,"Empresarial");assert.equal(payload.trialImages,0);
   assert.deepEqual(after.draft,before.draft);assert.deepEqual(f.client,client);
   assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
+});
+
+for (const kind of ["image","video"]) test(`${kind}: blank caption uses My Images caption service once before the same receiver admission`,async t=>{
+  const f=await fixture(t),prepared=await draft(f,kind),{id,requestId,...item}=prepared.draft.items[0];
+  f.setOutput({reply:"Preparei a publicação.",photoDescriptions:[],items:[{...item,caption:""}]});
+  const blank=await f.service.message(claims(),{requestId:uuid(),message:"Prepare esta foto com a legenda automática.",photoIds:[]});
+  assert.equal(blank.draft.items[0].caption,"");assert.equal(f.captionCalls.length,0);
+  const client=structuredClone(f.client),body=confirmation(blank),confirmed=await f.service.confirm(claims(),body);
+  await tick();await f.service.processPending();await tick();await f.service.confirm(claims(),body);await f.service.processPending();
+  assert.equal(f.captionCalls.length,1);assert.equal(f.submissions.length,1);
+  const generated=f.captionCalls[0],submitted=f.submissions[0],row=blank.draft.items[0];
+  assert.equal(generated.input.requestId,row.requestId);assert.equal(generated.input.ticket,submitted.data.appCalendar.ticket);
+  assert.equal(generated.input.guidance,"Informação autorizada para a publicação: R$ 39,90");
+  assert.equal(generated.input.mediaKind,kind==="video"?"video":undefined);
+  assert.equal(generated.file.path,path.join(f.root,hash("assistant-v1\0"+OWNER),row.photoId+".png"));
+  assert.equal(generated.file.mimetype,"image/png");assert.equal(submitted.data.imageCaption,"Confira esta oferta por R$ 39,90!");
+  assert.equal(submitted.data.mediaKind,kind);assert.equal(submitted.key,hash(row.requestId));assert.deepEqual(f.client,client);
+  const stored=JSON.parse(fs.readFileSync(path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),"utf8"));
+  assert.equal(stored.campaigns.find(c=>c.id===confirmed.campaignId).items[0].caption,submitted.data.imageCaption);
+});
+
+test("a customer caption is preserved exactly and never calls caption AI",async t=>{
+  const f=await fixture(t),s=await draft(f);await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
+  assert.equal(f.captionCalls.length,0);assert.equal(f.submissions[0].data.imageCaption,s.draft.items[0].caption);
+});
+
+for(const option of ["captionFailure","blankCaption"])test(`${option}: no receiver submission or automatic repetition after unconfirmed caption`,async t=>{
+  const f=await fixture(t,{[option]:true}),s=await draft(f),{id,requestId,...item}=s.draft.items[0];
+  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[{...item,caption:""}]});
+  const blank=await f.service.message(claims(),{requestId:uuid(),message:"Prepare esta foto com legenda automática",photoIds:[]});
+  await f.service.confirm(claims(),confirmation(blank));await tick();await f.service.processPending();await tick();
+  await f.service.processPending();assert.equal(f.captionCalls.length,1);assert.equal(f.submissions.length,0);
+  const c=(await f.service.state(claims())).campaigns[0];assert.equal(c.status,"needs_attention");assert.equal(c.error,"assistant_caption_preserved");
+});
+
+test("a generated caption survives a later receiver failure and is not regenerated automatically",async t=>{
+  const f=await fixture(t,{submitFailure:true}),s=await draft(f),{id,requestId,...item}=s.draft.items[0];
+  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[{...item,caption:""}]});
+  const blank=await f.service.message(claims(),{requestId:uuid(),message:"Prepare a foto com a legenda automática",photoIds:[]});
+  await f.service.confirm(claims(),confirmation(blank));await tick();await f.service.processPending();await tick();await f.service.processPending();
+  assert.equal(f.captionCalls.length,1);assert.equal(f.submissions.length,1);
+  const stored=JSON.parse(fs.readFileSync(path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),"utf8"));
+  assert.equal(stored.campaigns[0].items[0].caption,"Confira esta oferta por R$ 39,90!");assert.equal(stored.campaigns[0].status,"needs_attention");
 });
