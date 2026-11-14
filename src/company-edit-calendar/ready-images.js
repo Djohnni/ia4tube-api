@@ -64,7 +64,7 @@ function createReadyImageService(ports) {
     if (!['image','video'].includes(mediaKind)) fail('input_invalid',400);
     let row = inspect(ticket);
     if (row.expiresAt <= clock()) fail("context_expired");
-    const remaining = await (mediaKind==='video'?remainingVideos:remainingImages)({ owner: row.owner, verifiedClaims: row.sessionIdentity,
+    const remaining = await (mediaKind==='video'?remainingVideos:remainingImages)({ owner: row.owner, destination: row.request.destination, verifiedClaims: row.sessionIdentity,
       ipIdentity: row.ipIdentity, freeArtBlocked: row.freeArtBlocked });
     row = inspect(ticket);
     if (row.expiresAt <= clock()) fail("context_expired");

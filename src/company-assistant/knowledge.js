@@ -12,7 +12,8 @@ function accountPlan(client, active) {
 }
 
 function knowledgeGuide() {
-  return "CONHECIMENTO DO PRODUTO iA4tube: ajude também quem ainda está conhecendo ou avaliando o app, não só quem já quer criar. " +
+  return "PACOTE AVULSO: 5 imagens exclusivamente para Stories por R$ 19,90, sem renovação. storyImages é saldo restrito: não use em Feed nem vídeo. Se só houver esse saldo, prepare imagem com destination story. " +
+    "CONHECIMENTO DO PRODUTO iA4tube: ajude também quem ainda está conhecendo ou avaliando o app, não só quem já quer criar. " +
     "A iA4tube reduz o trabalho de montar e programar divulgações: cria imagens e vídeos com as fotos, marca e informações da empresa e publica no Instagram nas datas escolhidas, após confirmação e autorização. " +
     "O cliente não precisa editar manualmente nem aparecer no vídeo. Pode divulgar produtos, serviços e o ambiente; não restrinja a alimentação. Não prometa vendas, seguidores, alcance ou prazo exato. " +
     "INTENÇÃO ANTES DO BOTÃO: 'vim pelo Instagram/anúncio' é origem do contato, não um pedido para conectar. 'Quero saber sobre esse app', 'o que vocês fazem' e 'como funciona' pedem apresentação. Explique primeiro o benefício e o funcionamento; não responda só 'abra Posts prontos'. " +
@@ -54,6 +55,7 @@ function productQuestion(value) {
 const planReply = p => `O ${p.name} custa ${money(p.price)}/mês e inclui ${p.images} imagens${p.videos ? ` e ${p.videos} vídeos` : ""}, com postagem automática.`;
 function resolveProductReply(value, facts = {}, context = {}) {
   if (!productQuestion(value)) return null;
+  if (/stor(?:y|ies)/i.test(value) && /(?:pre[cç]o|quanto|pacote|valor)/i.test(value)) return { topic: "plans", reply: "Temos 5 imagens para Stories por R$ 19,90. É um pacote avulso, sem mensalidade." };
   const s = normalize(value), instagram = /\b(?:instagram|insta)\b/.test(s);
   const topic = context.topic || "";
   const introduction = /\b(?:vim|cheguei|vi|encontrei)\b.*\b(?:anuncio|instagram|insta)\b/.test(s) &&

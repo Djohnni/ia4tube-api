@@ -68,7 +68,7 @@ function createImageCaptionService({ enabled, root, directories, ticketContext, 
     const journal = filename(row.id);
     row = inspect(input.ticket);
     if (fs.existsSync(journal)) return existing(journal, fingerprint, row.id);
-    const remaining = await (input.mediaKind==='video'?remainingVideos:remainingImages)({ owner: row.owner, verifiedClaims: row.sessionIdentity,
+    const remaining = await (input.mediaKind==='video'?remainingVideos:remainingImages)({ owner: row.owner, destination: row.request.destination, verifiedClaims: row.sessionIdentity,
       ipIdentity: row.ipIdentity, freeArtBlocked: row.freeArtBlocked });
     row = inspect(input.ticket);
     if (fs.existsSync(journal)) return existing(journal, fingerprint, row.id);

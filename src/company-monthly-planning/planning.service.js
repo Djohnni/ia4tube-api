@@ -790,6 +790,8 @@ function refreshPlanningReservationCounters(cliente) {
   };
 }
 
+const storyQuota = require("../billing/story-quota");
+
 function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const freeArtBlocked = options?.freeArtBlocked === true;
   const freeArtOptions = { freeArtBlocked,
@@ -799,6 +801,9 @@ function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
   refreshPlanningReservationCounters(cliente);
+
+  if (options.storyOnlyEligible === true && quantity === 1 && storyQuota.remaining(cliente) >= 1)
+    return { billing, charge: { mensal: 0, gratis: 0, avulsa: 0, avulsa_story: 1 } };
 
   const mediaQuota = billingService.getMediaQuotaStatus(cliente);
   if (mediaQuota.policyVersion === 1) {
@@ -864,6 +869,13 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
   const monthlyQuantity = Math.max(0, Number(charge.mensal ?? quantity));
   const freeArtQuantity = Math.max(0, Math.min(1, Number(charge.gratis || 0)));
   const standaloneQuantity = Math.max(0, Number(charge.avulsa || 0));
+  const storyQuantity = Number(charge.avulsa_story || 0);
+  if (storyQuantity) {
+    if (freeArtOptions.storyOnlyEligible !== true || quantity !== 1 || storyQuantity !== 1 ||
+        monthlyQuantity || freeArtQuantity || standaloneQuantity || charge.mensal_video || charge.media_quota)
+      throw Object.assign(new Error("Reserva de Story invalida."), { code: "story_reservation_invalid", statusCode: 503 });
+    storyQuota.consume(cliente, planningId, createdAt);
+  }
   const mediaQuota = charge.media_quota;
   const videoMonthlyQuantity = Math.max(0, Number(charge.mensal_video || 0));
 
@@ -941,12 +953,13 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     artes_mensais_reservadas: monthlyQuantity,
     artes_gratis_consumidas: freeArtQuantity,
     artes_avulsas_consumidas: standaloneQuantity,
+    ...(storyQuantity ? { stories_avulsos_consumidos: storyQuantity } : {}),
     ...(mediaQuota?.policyVersion === 1 ? { videos_mensais_reservados: videoMonthlyQuantity,
       videos_bloqueados_ativos: videoMonthlyQuantity, media_quota: structuredClone(mediaQuota) } : {}),
     artes_bloqueadas_ativas: monthlyQuantity,
     artes_produzidas: 0,
     artes_devolvidas: 0,
-    cobranca_origem: freeArtQuantity >= quantity
+    cobranca_origem: storyQuantity ? "story_avulso" : freeArtQuantity >= quantity
       ? "arte_gratis"
       : freeArtQuantity > 0
         ? "mista"
@@ -965,6 +978,7 @@ function reservePlanningArts(cliente, planningId, quantity, createdAt, billing, 
     artes_mensais_reservadas: monthlyQuantity,
     artes_gratis_consumidas: freeArtQuantity,
     artes_avulsas_consumidas: standaloneQuantity,
+    ...(storyQuantity ? { stories_avulsos_consumidos: storyQuantity } : {}),
     ...(mediaQuota?.policyVersion === 1 ? { videos_mensais_reservados: videoMonthlyQuantity,
       videos_bloqueados_ativos: videoMonthlyQuantity, media_quota: structuredClone(mediaQuota) } : {}),
     livres_para_criar_arte: usage.livres_para_criar_arte,
@@ -998,6 +1012,12 @@ function releasePlanningReservation(cliente, planning) {
     };
   }
 
+  if (reserva.stories_avulsos_consumidos === 1) {
+    const unused = Math.max(Number(reserva.artes_produzidas || 0), Number(planning.ja_produzidas || 0)) === 0;
+    const returned = unused && storyQuota.refund(cliente, planningId, new Date().toISOString());
+    Object.assign(reserva, { status: "cancelada", artes_bloqueadas_ativas: 0, artes_devolvidas: Number(returned) });
+    return { billing_alterado: Boolean(returned), artes_devolvidas: Number(returned), livres_para_criar_arte: Number(cliente.artes_mensais_restantes || 0) };
+  }
   if (reserva.media_quota?.policyVersion === 1) {
     const quota = reserva.media_quota, video = quota.mediaKind === "video";
     const monthly = Number(video ? reserva.videos_mensais_reservados || 0 : reserva.artes_mensais_reservadas || 0);
@@ -1533,6 +1553,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
   const profile = normalizeProfile(body, cliente);
   // This capability is a trusted function argument from verified admission, never an HTTP body field.
   const billingOptions = { freeArtBlocked,
+    storyOnlyEligible: Boolean(editRegistration && editRegistration.mediaKind === "image" && instagramDestination === "story"),
     mediaKind: editRegistration ? editRegistration.mediaKind || "video" : "image",
     instagramFreeClaim: instagramFreeClaim === true && editRegistration?.kind === "edit_calendar_admission_v1" &&
       editRegistration.mediaKind === "image",
@@ -1608,6 +1629,7 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
       artes_mensais_reservadas: reservation.artes_mensais_reservadas,
       artes_gratis_consumidas: reservation.artes_gratis_consumidas,
       artes_avulsas_consumidas: reservation.artes_avulsas_consumidas,
+      ...(reservation.stories_avulsos_consumidos ? { stories_avulsos_consumidos: reservation.stories_avulsos_consumidos } : {}),
       ...(reservation.media_quota ? { videos_mensais_reservados: reservation.videos_mensais_reservados,
         videos_bloqueados_ativos: reservation.videos_bloqueados_ativos, media_quota: reservation.media_quota } : {}),
       artes_bloqueadas_ativas: reservation.artes_mensais_reservadas,
@@ -3520,6 +3542,7 @@ function buildChildBriefing({ briefingArte, temaInterno, objetivoInterno, forbid
 
 function planningChargeFieldsForItem(planning, item) {
   const reserva = planning?.reserva || {};
+  if (reserva.stories_avulsos_consumidos === 1) return { cobranca_origem: "story_avulso", tipo_compra: "avulsa_story", valor_cobrado: 0, origem_promocional: "", marketing_context: "" };
   const ordem = Math.max(1, Number(item?.ordem || 1));
   const freeQuantity = Math.max(0, Number(reserva.artes_gratis_consumidas || 0));
   const monthlyQuantity = Math.max(0, Number(reserva.artes_mensais_reservadas || 0));

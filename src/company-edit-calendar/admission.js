@@ -3,6 +3,7 @@
 const path = require("node:path"), crypto = require("node:crypto");
 const planning = require("../company-monthly-planning/planning.service");
 const billing = require("../billing/billing.service");
+const storyQuota = require("../billing/story-quota");
 const { reservationAllocation, allocationUnits, matchesAllocation } = require("./media-allocation");
 const { admissionInput, admissionOrderId, statusInput, cancelInput, hash, canonicalJson, fail, UUID, HASH } = require("./admission-contract");
 const FREE_FIELDS = ["arte_gratis_disponivel", "arte_gratis_usada", "arte_gratis_usada_em", "arte_gratis_pedido_id", "arte_gratis_criada_em"];
@@ -114,7 +115,7 @@ function createEditAdmissionService(ports) {
     const quota = billing.getMediaQuotaStatus(copy, now);
     const image = quota.monthly.image.remaining, video = quota.monthly.video.remaining;
     if (![image, video, standalone].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error("availability_billing_invalid");
-    return { image: image + standalone >= 1, video: video + standalone >= 1,
+    return { storyCount: storyQuota.remaining(copy), image: image + standalone + storyQuota.remaining(copy) >= 1, video: video + standalone >= 1,
       imageCount: image + standalone, videoCount: video + standalone, freeFeature: status.arte_gratis_ativa === true };
   }
   // A read-only hint for the new photo list. It never creates/migrates a free grant.
@@ -122,10 +123,11 @@ function createEditAdmissionService(ports) {
   async function remainingVideos({ owner }) {
     try { return readPaidAvailability(ownerClient({ whatsapp: owner }).client).videoCount; } catch { return null; }
   }
-  async function remainingImages({ owner, verifiedClaims, ipIdentity = null, freeArtBlocked = false }) {
+  async function remainingImages({ owner, verifiedClaims, ipIdentity = null, freeArtBlocked = false, destination = null }) {
     let current = ownerClient({ whatsapp: owner }), measured;
     try { measured = readPaidAvailability(current.client); } catch { return null; }
-    if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount;
+    const storyCount = destination === null || destination === "story" ? measured.storyCount : 0;
+    if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount + storyCount;
     if (!verifiedClaims || typeof observeConnection !== "function") return null;
     let connection;
     try { connection = await observeConnection(verifiedClaims); } catch { return null; }
@@ -133,10 +135,10 @@ function createEditAdmissionService(ports) {
     current = ownerClient({ whatsapp: owner });
     try {
       measured = readPaidAvailability(current.client);
-      if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount;
+      if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount + (destination === null || destination === "story" ? measured.storyCount : 0);
       const free = inspectFreeClaim(owner, current.client, connection, ledger(),
         { ipIdentity, blocked: freeArtBlocked });
-      return measured.imageCount + Number(Boolean(free));
+      return measured.imageCount + (destination === null || destination === "story" ? measured.storyCount : 0) + Number(Boolean(free));
     } catch { return null; }
   }
   async function availability(claims, policy = {}) {
@@ -279,7 +281,7 @@ function createEditAdmissionService(ports) {
         !billing.hasAvailablePlanArt(before.client) && typeof observeConnection === "function") {
       // Observational existing service only. No provider call, OAuth transition or calendar synchronization.
       try { connection = await observeConnection(initial.sessionIdentity); }
-      catch { if (!billing.hasAvailableStandaloneArt(before.client)) fail("admission_unavailable", 503); }
+      catch { if (!(initial.request.destination === "story" && storyQuota.remaining(before.client) > 0) && !billing.hasAvailableStandaloneArt(before.client)) fail("admission_unavailable", 503); }
     }
     // Recheck after the await, still before directory/lock/journal writes. An expired or deactivated capability cannot write.
     inspectCapability(request); directories(); const release = acquireLock();
@@ -386,6 +388,10 @@ function createEditAdmissionService(ports) {
     } else if (allocation.monthly) {
       if (current.client.planejamento_mensal_ciclo !== allocation.cycle) fail("allocation_reconciliation_required", 503);
       current.client.artes_mensais_restantes = Number(current.client.artes_mensais_restantes || 0) + 1;
+    }
+    if (allocation.storyStandalone) {
+      if (allocationUnits(allocation) !== 1 || !matchesAllocation(allocation, held)) fail("allocation_reconciliation_required", 503);
+      storyQuota.refund(current.client, row.planningId, new Date(clock()).toISOString());
     }
     if (allocation.standalone) {
       current.client.artes_avulsas_restantes = Number(current.client.artes_avulsas_restantes || 0) + 1;

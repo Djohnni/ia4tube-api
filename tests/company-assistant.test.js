@@ -14,7 +14,7 @@ async function fixture(t, options={}) {
   const service=createAssistantService({root,clock:()=>NOW,apiKey:"fake-test-key",dispatchSpacingMs:0,
     readClient:o=>o===OWNER?client:null, profile:{get:()=>({profile:{has_logo:true,...options.profile}}),logo:()=>png},
     observeConnection:async()=>({state:"connected",health:"healthy"}),
-    calendar:{availability:async()=>({availability:{canImage:true,canVideo:true}}),createContext:async(c,v)=>{
+    calendar:{...(options.trialCount===undefined?{}:{assistantTrialRemaining:async()=>options.trialCount}),availability:async()=>({availability:{canImage:true,canVideo:true}}),createContext:async(c,v)=>{
       contextCalls.push(v);return {ticket:v.requestId+"."+"T".repeat(43)};
     },generateImageCaption:async(input,file)=>{
       captionCalls.push({input,file});if(options.captionFailure)throw Error("uncertain_caption");
@@ -478,4 +478,15 @@ test("photo-specific visual guidance stays with the correct photo in a multi-ima
   await f.service.confirm(claims(),confirmation(s));await tick();await f.service.processPending();await tick();
   assert.equal(f.submissions.length,2);assert(f.submissions[0].data.notes.includes("Fundo verde e logo no canto direito."));
   assert(f.submissions[1].data.notes.includes("Preservar foto e adicionar só a logo."));
+});
+
+test("one-off Story balance reaches the chat, prepares Story-only and refuses a later Feed override",async t=>{
+  const f=await fixture(t,{free:true,trialCount:0});
+  require("../src/billing/story-quota").credit(f.client,"synthetic-story-payment","synthetic-story-purchase","today");
+  const s=await draft(f);
+  assert.equal(s.storyImages,5);assert.equal(s.images,5);assert.equal(s.videos,0);
+  assert.equal(s.draft.items[0].destination,"story");
+  const input=confirmation(s); input.items[0].destination="both";
+  await assert.rejects(f.service.confirm(claims(),input),{code:"assistant_balance_required"});
+  assert.equal(f.submissions.length,0);assert.equal(require("../src/billing/story-quota").remaining(f.client),5);
 });

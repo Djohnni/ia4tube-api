@@ -3,6 +3,7 @@
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), sharp = require("sharp");
 const { atomicWriteJson } = require("../notifications/fcm-token-store");
 const billing = require("../billing/billing.service");
+const storyQuota = require("../billing/story-quota");
 const { dateTime, caption } = require("../social/calendar/model");
 const { admissionOrderId } = require("../company-edit-calendar/admission-contract");
 const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
@@ -97,8 +98,9 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
   function limits(owner) {
     const c = structuredClone(readClient(owner)), q = billing.getMediaQuotaStatus(c, new Date(clock()));
     const standalone = billing.getStandaloneArtStatus(c).artes_avulsas_restantes;
-    const paid = billing.isPlanActive(c, new Date(clock()));
-    return { images: q.monthly.image.remaining + standalone, videos: q.monthly.video.remaining + standalone, standalone,
+    const storyImages = storyQuota.remaining(c);
+    const paid = billing.isPlanActive(c, new Date(clock())) || storyImages > 0;
+    return { storyImages, images: q.monthly.image.remaining + standalone, videos: q.monthly.video.remaining + standalone, standalone,
       paid, plan: accountPlan(c, paid), messages: paid ? 120 : 20, budgetUsd: paid ? 3 / 5.5 : .5 / 5.5,
       period: paid ? (q.grantRef?.cycleStart || new Date(clock()).toISOString().slice(0, 7)) : "trial" };
   }
@@ -108,7 +110,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     const availability = await calendar.availability(claims);
     const trial = connected && typeof calendar.assistantTrialRemaining === "function" ? await calendar.assistantTrialRemaining(claims) :
       (availability.availability?.canImage === true && l.images === 0 ? 1 : 0);
-    const imageCount = l.images + trial;
+    const imageCount = l.images + trial + l.storyImages;
     let p = { profile: {} }; try { p = profile.get(owner); } catch {}
     return { ...l, images: imageCount, trialImages: trial, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {} };
   }
@@ -122,7 +124,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         afterMessageId: c.afterMessageId || legacyAnchor, error: c.error || null };
     }).filter(c => c.status !== "sent" || messages.some(m => m.id === c.afterMessageId)),
     capabilities: CAPABILITIES,
-    images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, businessType: f.profile?.ramo || "", messageLimit: f.messages,
+    images: f.images, storyImages: f.storyImages, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, businessType: f.profile?.ramo || "", messageLimit: f.messages,
     messagesUsed: c.messages, budgetReached: c.usd + .01 > f.budgetUsd }; }
   async function state(claims) { const owner = account(claims); return wire(load(owner), await facts(claims)); }
   async function upload(claims, id, bytes, name) {
@@ -155,15 +157,17 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       return { id: crypto.randomUUID(), requestId: crypto.randomUUID(), photoId: v.photoId, kind: v.kind, title: text(v.title, 160),
         caption: caption(text(v.caption, 2200)), imageText: v.imageText === null ? null : text(v.imageText, 300),
         segment: text(v.segment || "auto", 80), ...(v.visualInstructions !== undefined ? { visualInstructions: text(v.visualInstructions, 1000) } : {}),
-        date: v.date === null ? null : text(v.date, 10), time: v.time === null ? null : text(v.time, 5), destination: v.destination };
+        date: v.date === null ? null : text(v.date, 10), time: v.time === null ? null : text(v.time, 5), destination: f.storyImages > 0 && f.images - f.storyImages <= 0 && v.kind === "image" ? "story" : v.destination };
     });
     assertBalances(result, f);
     return result;
   }
   function assertBalances(items, f) {
-    const images = items.filter(i => i.kind === "image").length, videos = items.length - images;
-    if (images > f.images || videos > f.videos ||
-        Math.max(0, images - (f.images - f.standalone)) + Math.max(0, videos - (f.videos - f.standalone)) > f.standalone)
+    const imageItems = items.filter(i => i.kind === "image");
+    const images = imageItems.length - Math.min(f.storyImages || 0, imageItems.filter(i => i.destination === "story").length);
+    const videos = items.length - imageItems.length, generalImages = f.images - (f.storyImages || 0);
+    if (images > generalImages || videos > f.videos ||
+        Math.max(0, images - (generalImages - f.standalone)) + Math.max(0, videos - (f.videos - f.standalone)) > f.standalone)
       fail("balance_required", 402);
   }
   function report(claims, input) {
@@ -212,7 +216,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       const allowedPhotoIds = new Set([...creativeContext.photoIds, ...input.photoIds]);
       const content = [{ type: "input_text", text: JSON.stringify({ today: new Intl.DateTimeFormat("en-CA", {timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(clock())),
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
-        images: f.images, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
+        images: f.images, storyImages: f.storyImages, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
         capabilities: CAPABILITIES, requestMode: helpOnly ? "app_help" : "creation_or_conversation",
         conversationTopic: s.assistanceTopic || null, currentCatalog: currentCatalog(), plan: f.plan, trialImages: f.trialImages,
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),

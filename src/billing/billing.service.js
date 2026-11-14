@@ -376,6 +376,8 @@ function getBillingStatus(cliente, now = new Date(), options = {}) {
     videoQuota: mediaQuota.monthly.video,
     ...freeArt,
     ...standaloneArt,
+    stories_avulsos_restantes: require("./story-quota").remaining(cliente),
+    pacote_stories: require("./story-quota").STORY_PACKAGE,
     saldo_mensal: roundMoney(cliente.saldo_mensal || 0),
     saldo_extra: roundMoney(cliente.saldo_extra || 0),
     saldo: getAvailableBalance(cliente),

@@ -12,17 +12,18 @@ function quotaMetadata(value) {
 }
 
 function allocationUnits(value) {
-  const amounts = [value.monthly, value.monthlyVideo ?? 0, value.standalone, value.free];
+  const amounts = [value.monthly, value.monthlyVideo ?? 0, value.standalone, value.free, value.storyStandalone ?? 0];
   if (!amounts.every(amount => Number.isSafeInteger(amount) && amount >= 0)) fail("allocation_reconciliation_required", 503);
   const metadata = quotaMetadata(value.mediaQuota);
   if ((!metadata && amounts[1]) || (metadata?.mediaKind === "image" && amounts[1]) ||
-      (metadata?.mediaKind === "video" && (amounts[0] || amounts[3]))) fail("allocation_reconciliation_required", 503);
+      (metadata?.mediaKind === "video" && (amounts[0] || amounts[3] || amounts[4]))) fail("allocation_reconciliation_required", 503);
   return amounts.reduce((sum, amount) => sum + amount, 0);
 }
 
 function reservationAllocation(reservation, cycle = reservation?.ciclo) {
   const value = { cycle, monthly: Number(reservation?.artes_mensais_reservadas || 0),
     standalone: Number(reservation?.artes_avulsas_consumidas || 0), free: Number(reservation?.artes_gratis_consumidas || 0) };
+  if (reservation?.stories_avulsos_consumidos) value.storyStandalone = Number(reservation.stories_avulsos_consumidos);
   const metadata = quotaMetadata(reservation?.media_quota), video = Number(reservation?.videos_mensais_reservados || 0);
   if (metadata && ![reservation.artes_mensais_reservadas, reservation.videos_mensais_reservados,
     reservation.artes_avulsas_consumidas, reservation.artes_gratis_consumidas].every(amount => Number.isSafeInteger(amount) && amount >= 0))
@@ -38,6 +39,7 @@ function matchesAllocation(value, reservation, cycle = reservation?.ciclo) {
   return allocationUnits(value) === allocationUnits(actual) && value.cycle === actual.cycle &&
     value.monthly === actual.monthly && (value.monthlyVideo || 0) === (actual.monthlyVideo || 0) &&
     value.standalone === actual.standalone && value.free === actual.free &&
+    (value.storyStandalone || 0) === (actual.storyStandalone || 0) &&
     canonicalJson(value.mediaQuota || null) === canonicalJson(actual.mediaQuota || null);
 }
 

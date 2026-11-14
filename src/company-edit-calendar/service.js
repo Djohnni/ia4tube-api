@@ -43,7 +43,7 @@ function bindInput(value) {
 }
 function billingDigest(client) {
   // No password, token, contact data or entire client snapshot enters this journal.
-  const fields = Object.keys(client).filter(key => /^(plano|artes_|videos_|arte_gratis|planejamento_mensal|ciclo_|usados_no_ciclo|saldo|ultimo_pagamento)/.test(key)).sort();
+  const fields = Object.keys(client).filter(key => /^(stories_avulsos|plano|artes_|videos_|arte_gratis|planejamento_mensal|ciclo_|usados_no_ciclo|saldo|ultimo_pagamento)/.test(key)).sort();
   return hash(JSON.stringify(fields.map(key => [key, client[key]])));
 }
 function privateDirectory(directory) {

@@ -2318,6 +2318,7 @@ app.get("/me", auth, (req, res) => {
     quotaVersion: billing.quotaVersion,
     imageQuota: billing.imageQuota,
     videoQuota: billing.videoQuota,
+    stories_avulsos_restantes: billing.stories_avulsos_restantes,
     artes_avulsas_restantes: billing.artes_avulsas_restantes,
     artes_avulsas_usadas: billing.artes_avulsas_usadas,
     artes_avulsas_total_compradas: billing.artes_avulsas_total_compradas,
@@ -2651,6 +2652,11 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
 });
 
 // ===== MERCADO PAGO =====
+const storyCheckout = require("./src/billing/story-checkout").createStoryCheckout({
+  root: path.join(DATA_DIR, "private", "story-purchases"), readClients: readClientes, writeClients: writeClientes,
+  issuePix: createMercadoPagoPixPayment, assertAllowed: assertPixIssuanceAllowed
+});
+
 async function createMercadoPagoPixPayment({ amount, description, payerKey, externalReference, metadata, idempotencyKey }) {
   assertPixIssuanceAllowed(payerKey);
   if (!MP_ACCESS_TOKEN) {
@@ -2841,6 +2847,14 @@ app.post("/billing/saldo/pix", auth, async (req, res) => {
       error: e.message || "Erro interno ao gerar Pix",
       detalhe: e.detail
     });
+  }
+});
+
+app.post("/billing/stories/pix", auth, async (req, res) => {
+  try { return res.json(await storyCheckout.checkout(req.user.whatsapp)); }
+  catch (e) {
+    if (sendBlockedPixError(e, req, res)) return;
+    return res.status(e.statusCode || 503).json({ ok: false, code: e.code || "story_checkout_unavailable", error: "Não foi possível preparar o Pix. Tente novamente; sua tentativa será preservada." });
   }
 });
 
@@ -3092,6 +3106,14 @@ app.post("/webhook/mercadopago", async (req, res) => {
 
     const external = String(pagamento.external_reference || "");
     const tipo = pagamento.metadata?.tipo || "";
+
+    if (tipo === "stories_pack_pix") {
+      const receipt = storyCheckout.approve(pagamento);
+      processados = readMpProcessados();
+      processados[paymentId] = { tipo, whatsapp: receipt.owner, status: "approved", criado_em: new Date().toISOString() };
+      writeMpProcessados(processados);
+      return res.json({ ok: true });
+    }
 
     if (tipo === "pedido_pix") {
       const whatsapp = pagamento.metadata?.whatsapp || external.split("|")[1];
