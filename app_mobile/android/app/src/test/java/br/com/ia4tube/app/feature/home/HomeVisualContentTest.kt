@@ -306,6 +306,23 @@ class HomeVisualContentTest {
         }
     }
 
+    @Test fun standaloneStoriesAppearBesideMonthlyCreditsAndInTheComboBadge() {
+        HomeHarness(initial=HomeUiState(loading=false,summaryLoading=false,planoStatus="active",planoNome="Empresarial",
+            quotaVersion=1,artesMensaisRestantes=15,videosMensaisRestantes=15,storiesAvulsosRestantes=4)).use { home ->
+            assertEquals("34",home.label(home.tag("home_credits_badge")))
+            home.assertAction("home_footer_more",null)
+            val summary=home.label(home.tag("home_plans"))
+            assertTrue(summary.contains("15 imagens"));assertTrue(summary.contains("15 vídeos"));assertTrue(summary.contains("4 Stories"))
+            home.assertTextFits(home.tag("home_plans"))
+        }
+    }
+    @Test fun aStoryOnlyAccountShowsItsOwnCreditsWithoutInventingMonthlyImages() {
+        HomeHarness(initial=HomeUiState(loading=false,summaryLoading=false,storiesAvulsosRestantes=4)).use { home ->
+            assertEquals("4",home.label(home.tag("home_credits_badge")))
+            home.assertAction("home_footer_more",null)
+            assertTrue(home.label(home.tag("home_plans")).contains("4 Stories disponíveis"))
+        }
+    }
     @Test fun moreMenuActionsKeepSeparateCallbacks() {
         HomeHarness().use { home ->
             for ((tag, expected) in listOf(

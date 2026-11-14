@@ -125,10 +125,15 @@ internal fun HomeVisualContent(
     // Same credit calculation as the previous Home combo shortcut; these are not order counts.
     val imageCredits = (if (activePlan) state.artesMensaisRestantes else 0).coerceAtLeast(0)
     val videoCredits = (if (activePlan && state.quotaVersion == 1) state.videosMensaisRestantes else 0).coerceAtLeast(0)
-    val credits = imageCredits + videoCredits + state.artesAvulsasRestantes.coerceAtLeast(0)
+    val storyCredits = state.storiesAvulsosRestantes.coerceAtLeast(0)
+    val storyCreditLabel = "$storyCredits ${if (storyCredits == 1) "Story" else "Stories"}"
+    val standardCredits = imageCredits + videoCredits + state.artesAvulsasRestantes.coerceAtLeast(0)
+    val credits = standardCredits + storyCredits
     val creditDescription = if (state.quotaVersion == 1) "$imageCredits imagens · $videoCredits vídeos" +
-        (if (state.artesAvulsasRestantes > 0) " · ${state.artesAvulsasRestantes} créditos anteriores" else "")
-        else "$credits imagens disponíveis"
+        (if (state.artesAvulsasRestantes > 0) " · ${state.artesAvulsasRestantes} créditos anteriores" else "") +
+        (if (storyCredits > 0) " · $storyCreditLabel" else "")
+        else if (standardCredits == 0 && storyCredits > 0) "$storyCreditLabel disponíveis"
+        else "$standardCredits imagens disponíveis" + (if (storyCredits > 0) " · $storyCreditLabel" else "")
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
     // Some system bars consume IME insets before Compose receives them. The resized

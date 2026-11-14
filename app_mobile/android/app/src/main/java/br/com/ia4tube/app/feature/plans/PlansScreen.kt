@@ -36,6 +36,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -60,14 +64,22 @@ import br.com.ia4tube.app.ui.components.ScreenScaffold
 fun PlansScreen(viewModel: PlansViewModel, onBack: () -> Unit,
     palette: PremiumHomePalette = premiumHomePalette(PremiumHomeTheme.Black)) {
     val state by viewModel.uiState.collectAsState()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshStoryBalance()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     state.pix?.let { PixPaymentDialog(pix = it, onDismiss = viewModel::clearPix) }
-    ComboPlansContent(state, palette, onBack, viewModel::assinarPlano, viewModel::comprarStories)
+    ComboPlansContent(state, palette, onBack, viewModel::assinarPlano, viewModel::comprarStories, viewModel::refreshStoryBalance)
 }
 
 /** Lightweight native presentation; reuses the existing Pix callback and the Home palette. */
 @Composable
 internal fun ComboPlansContent(state: PlansUiState, palette: PremiumHomePalette,
-    onBack: () -> Unit, onChoose: (String) -> Unit, onStories: () -> Unit = {}) {
+    onBack: () -> Unit, onChoose: (String) -> Unit, onStories: () -> Unit = {}, onRefreshBalance: () -> Unit = {}) {
     ScreenScaffold(containerColor = palette.screenBackground) {
         Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
             palette.panelGradient.first(), palette.screenBackground, palette.screenBackground
@@ -87,7 +99,7 @@ internal fun ComboPlansContent(state: PlansUiState, palette: PremiumHomePalette,
                     modifier = Modifier.fillMaxWidth().background(palette.cameraBackground, RoundedCornerShape(14.dp))
                         .border(1.dp, palette.panelBorder, RoundedCornerShape(14.dp)).padding(14.dp).testTag("combo_error"))
             }
-            StoryPackageCard(state.loadingAction, palette, onStories)
+            StoryPackageCard(state, palette, onStories, onRefreshBalance)
             Text("Planos mensais", color = palette.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             mediaCombos.forEach { offer ->
                 ComboOfferCard(offer, state.loadingAction, palette, onChoose)
@@ -99,7 +111,8 @@ internal fun ComboPlansContent(state: PlansUiState, palette: PremiumHomePalette,
 }
 
 @Composable
-private fun StoryPackageCard(loadingAction: String, palette: PremiumHomePalette, onBuy: () -> Unit) {
+private fun StoryPackageCard(state: PlansUiState, palette: PremiumHomePalette, onBuy: () -> Unit, onRefreshBalance: () -> Unit) {
+    val loadingAction = state.loadingAction
     var confirming by remember { mutableStateOf(false) }
     if (confirming) AlertDialog(onDismissRequest = { confirming = false },
         title = { Text("5 Stories por R$ 19,90") },
@@ -112,6 +125,14 @@ private fun StoryPackageCard(loadingAction: String, palette: PremiumHomePalette,
         verticalArrangement = Arrangement.spacedBy(9.dp)) {
         Text("5 Stories", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Text("5 imagens + postagem automática nos Stories", color = palette.textSecondary, fontSize = 14.sp)
+        Text(when {
+            state.storyBalanceLoading -> "Consultando seu saldo…"
+            state.storiesRemaining != null -> "Seu saldo: ${state.storiesRemaining} ${if (state.storiesRemaining == 1) "Story" else "Stories"}"
+            else -> "Saldo de Stories indisponível"
+        }, color = palette.primaryBorder, fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag("story_package_balance"))
+        if (!state.storyBalanceLoading && state.storiesRemaining == null)
+            TextButton(onClick = onRefreshBalance) { Text("Atualizar saldo", color = palette.primaryBorder) }
         Text("R$ 19,90", color = palette.primaryBorder, fontSize = 29.sp, fontWeight = FontWeight.ExtraBold)
         Text("Pacote avulso · sem mensalidade", color = palette.textSecondary, fontSize = 12.sp)
         Button(onClick = { confirming = true }, enabled = loadingAction.isBlank(),

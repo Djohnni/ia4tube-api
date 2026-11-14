@@ -65,6 +65,20 @@ class ComboVisualTest {
             h.click("story_package_confirm"); assertEquals(listOf("stories"),h.events)
         }
     }
+    @Test fun actualStoryBalanceIsSeparateFromTheFiveImageOfferAndNeverStartsAPayment() {
+        for (remaining in listOf(4,0,1)) Harness(state=PlansUiState(storiesRemaining=remaining,storyBalanceLoading=false)).use { h ->
+            assertEquals("Seu saldo: $remaining ${if(remaining==1)"Story"else"Stories"}",h.label(h.tag("story_package_balance")))
+            assertTrue(h.label(h.tag("story_package")).contains("5 Stories"))
+            assertTrue(h.events.isEmpty())
+            h.assertTextFits()
+        }
+    }
+    @Test fun anUnavailableBalanceIsNeverShownAsZeroCredits() {
+        Harness(state=PlansUiState(storiesRemaining=null,storyBalanceLoading=false)).use { h ->
+            assertEquals("Saldo de Stories indisponível",h.label(h.tag("story_package_balance")))
+            assertTrue(h.events.isEmpty())
+        }
+    }
     @Test fun busyStateDisablesEveryPurchaseButtonWithoutStartingAnyWork() {
         Harness(state=PlansUiState(loadingAction=mediaCombos[1].id)).use { h ->
             assertNotNull(h.tag("story_package_buy").config.getOrNull(SemanticsProperties.Disabled))

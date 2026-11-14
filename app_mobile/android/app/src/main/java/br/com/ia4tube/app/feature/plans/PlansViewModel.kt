@@ -11,11 +11,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 
 data class PlansUiState(
     val loadingAction: String = "",
     val errorMessage: String = "",
-    val pix: BillingPixResult? = null
+    val pix: BillingPixResult? = null,
+    val storiesRemaining: Int? = null,
+    val storyBalanceLoading: Boolean = true
 )
 
 class PlansViewModel(
@@ -23,6 +26,24 @@ class PlansViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(PlansUiState())
     val uiState: StateFlow<PlansUiState> = _uiState.asStateFlow()
+    private var balanceJob: Job? = null
+
+    /** Observation only. Opening or resuming Combo never starts a purchase. */
+    fun refreshStoryBalance() {
+        balanceJob?.cancel()
+        val expectedToken = repository.getSavedToken()
+        if (expectedToken.isBlank()) {
+            _uiState.update { it.copy(storiesRemaining = null, storyBalanceLoading = false) }
+            return
+        }
+        _uiState.update { it.copy(storyBalanceLoading = true) }
+        balanceJob = viewModelScope.launch {
+            val result = repository.me()
+            if (repository.getSavedToken() != expectedToken) return@launch
+            _uiState.update { it.copy(storyBalanceLoading = false,
+                storiesRemaining = (result as? ApiResult.Success<br.com.ia4tube.app.data.models.MeResponse>)?.value?.storiesAvulsosRestantes?.coerceAtLeast(0)) }
+        }
+    }
 
     fun comprarSaldo(pacote: String = "saldo_990") {
         startPixAction("saldo") {
