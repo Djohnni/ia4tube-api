@@ -36,7 +36,7 @@ function ensureCreativeContext(state) {
   // An unconfirmed proposal is still the same preparation, including legacy
   // states whose earlier user messages have already been trimmed.
   for (const item of state.draft?.items || []) {
-    if (!context.photoIds.includes(item.photoId)) context.photoIds.push(item.photoId);
+    for (const id of item.photoIds || [item.photoId]) if (!context.photoIds.includes(id)) context.photoIds.push(id);
   }
   state.creativeContext = context;
   return context;

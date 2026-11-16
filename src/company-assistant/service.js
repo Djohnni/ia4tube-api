@@ -9,12 +9,13 @@ const { admissionOrderId } = require("../company-edit-calendar/admission-contrac
 const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
 const { accountPlan, currentCatalog, resolveProductReply } = require("./knowledge");
 const { creativeNotes } = require("./creative-brief");
+const { compositionContext, sourceIds } = require("./photo-composition");
 const { ensureCreativeContext, appendContextMessages, contextMessages, closeCreativeContext } = require("./creative-context");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
 const MODEL = "gpt-6-luna";
-const CAPABILITIES = Object.freeze({ imageFromPhoto: true, videoFromPhoto: true, videoSeconds: 10,
+const CAPABILITIES = Object.freeze({ imageFromPhoto: true, videoFromPhoto: true, videoSeconds: 10, combinePhotosOnRequest: true, maxCombinedPhotos: 4,
   uploadedFileTypes: ["image/jpeg", "image/png", "image/webp"], uploadVideo: false,
   videoMotion: "leve, preservando cenário e letreiros", videoMusic: true, voiceNarration: false,
   calendarAfterConfirmation: true, publishDirectlyFromChat: false, editInstagramProfile: false, browseWeb: false });
@@ -26,8 +27,9 @@ const outputSchema = { type: "object", additionalProperties: false, required: ["
   reply: { type: "string", maxLength: 120 }, photoDescriptions: { type: "array", items: { type: "object", additionalProperties: false,
     required: ["photoId", "description"], properties: { photoId: { type: "string" }, description: { type: "string" } } } },
   items: { type: "array", items: { type: "object", additionalProperties: false,
-    required: ["photoId", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"], properties: {
+    required: ["photoId", "photoIds", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"], properties: {
       photoId: { type: "string" }, kind: { type: "string", enum: ["image", "video"] }, title: { type: "string" },
+      photoIds: { type: "array", minItems: 1, maxItems: 4, items: { type: "string" } },
       caption: { type: "string" }, imageText: { type: ["string", "null"] }, segment: { type: "string" },
       visualInstructions: { type: "string", minLength: 1, maxLength: 1000 },
       date: { type: ["string", "null"] }, time: { type: ["string", "null"] }, destination: { type: "string", enum: ["feed", "story", "both"] }
@@ -36,6 +38,7 @@ const outputSchema = { type: "object", additionalProperties: false, required: ["
 const INSTRUCTIONS = "Você é o assistente da iA4tube para preparar publicações das empresas e ajudar a usar o app. Fale em português simples, como no WhatsApp. " +
   "reply deve ter uma ou no máximo duas linhas curtas (até 90 caracteres); excepcionalmente três linhas, até 120 caracteres. Sem listas, explicações longas ou várias perguntas. Essa regra vale só para reply, não para as legendas. " +
   "Recebeu foto e o que o cliente quer? Prepare items imediatamente. Não peça confirmações intermediárias. Um valor sem moeda é em reais (BRL); use R$ e vírgula decimal. Nunca pergunte se é em reais. " +
+  "FOTOS: photoComposition é a regra validada para a preparação atual. Em separate, cada foto enviada é uma arte própria, com photoIds contendo só seu photoId; não junte por inferir que produtos combinam ou por aparecer a palavra combo. Em combine, prepare exatamente UM item com todas e somente as photoComposition.photoIds, nessa ordem; photoId é a primeira foto e photoIds contém todas. Analise todos os produtos e a associação de seus preços, sem duplicar ângulos do mesmo produto. Não pergunte se quer juntar ou separar, nem peça confirmação adicional. Uma arte conjunta tem uma legenda, data e horário e usa um crédito da mídia final. " +
   "CAPACIDADES REAIS: crie imagem OU transforme uma FOTO em vídeo suave de 10 segundos, com música e sem fala, usando o Modo iA4tube já existente. Vídeo usa um crédito de vídeo, não de imagem. A entrada é sempre foto; NUNCA peça um vídeo pronto. Use a foto já enviada se estiver claro qual é; não peça novamente. " +
   "preferredPhotoIds identifica a seleção atual ou a última foto realmente enviada na conversa. Se o cliente disser última foto/foto que enviei, use essa referência; recentMessages também identifica as fotos de cada mensagem. " +
   "ISOLAMENTO DOS PEDIDOS: photos, recentMessages e currentDraft pertencem somente à preparação atual, ainda não confirmada. Pedidos confirmados não fornecem nomes, preços, legendas, fotos ou orientações para o próximo. O perfil e a logo da empresa são permanentes. " +
@@ -149,17 +152,25 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     } finally { busy.delete(owner); }
   }
   function photo(claims, id) { const owner = account(claims); if (!UUID.test(id) || !load(owner).photos.some(p => p.id === id)) fail("photo_not_found", 404); return fs.readFileSync(path.join(folder(owner), id + ".png")); }
-  function validateItems(items, s, f, allowedPhotoIds) {
+  function validateItems(items, s, f, allowedPhotoIds, composition) {
     if (!Array.isArray(items) || items.length > Math.min(35, f.images + f.videos)) fail("draft_invalid", 400);
     const result = items.map((v, n) => {
-      fields(v, ["photoId", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"]);
+      fields(v, ["photoId", "photoIds", "kind", "title", "caption", "imageText", "segment", "visualInstructions", "date", "time", "destination"]);
+      const ids = sourceIds(v);
+      if (!Array.isArray(ids) || ids.length < 1 || ids.length > 4 || new Set(ids).size !== ids.length || ids[0] !== v.photoId ||
+          ids.some(id => !allowedPhotoIds.has(id) || !s.photos.some(p => p.id === id)) ||
+          (composition.mode === "combine" ? items.length !== 1 || JSON.stringify(ids) !== JSON.stringify(composition.photoIds) : ids.length !== 1)) fail("draft_invalid", 400);
       if (!allowedPhotoIds.has(v.photoId) || !s.photos.some(p => p.id === v.photoId) || !["image", "video"].includes(v.kind) || !["feed", "story", "both"].includes(v.destination)) fail("draft_invalid", 400);
       if (v.visualInstructions !== undefined && !text(v.visualInstructions, 1000)) fail("draft_invalid", 400);
       return { id: crypto.randomUUID(), requestId: crypto.randomUUID(), photoId: v.photoId, kind: v.kind, title: text(v.title, 160),
+        ...(ids.length > 1 ? { photoIds: [...ids] } : {}),
         caption: caption(text(v.caption, 2200)), imageText: v.imageText === null ? null : text(v.imageText, 300),
         segment: text(v.segment || "auto", 80), ...(v.visualInstructions !== undefined ? { visualInstructions: text(v.visualInstructions, 1000) } : {}),
         date: v.date === null ? null : text(v.date, 10), time: v.time === null ? null : text(v.time, 5), destination: f.storyImages > 0 && f.images - f.storyImages <= 0 && v.kind === "image" ? "story" : v.destination };
     });
+    if (composition.mode === "combine" && result.length !== 1) fail("draft_invalid", 400);
+    if (composition.mode === "separate" && composition.photoIds.length > 1 && result.length &&
+        composition.photoIds.some(id => !result.some(item => item.photoId === id))) fail("draft_invalid", 400);
     assertBalances(result, f);
     return result;
   }
@@ -213,7 +224,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
         save(owner, s); return wire(s, f);
       }
-      const preferredPhotoIds = input.photoIds.length ? input.photoIds : creativeContext.lastPhotoIds.length ? creativeContext.lastPhotoIds : s.draft?.items?.map(i => i.photoId) || [];
+      const preferredPhotoIds = input.photoIds.length ? input.photoIds : creativeContext.lastPhotoIds.length ? creativeContext.lastPhotoIds : s.draft?.items?.flatMap(sourceIds) || [];
+      const photoComposition = compositionContext(msg, input.photoIds, preferredPhotoIds, s.draft);
       const allowedPhotoIds = new Set([...creativeContext.photoIds, ...input.photoIds]);
       const content = [{ type: "input_text", text: JSON.stringify({ today: new Intl.DateTimeFormat("en-CA", {timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(clock())),
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
@@ -221,7 +233,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         capabilities: CAPABILITIES, requestMode: helpOnly ? "app_help" : "creation_or_conversation",
         conversationTopic: s.assistanceTopic || null, currentCatalog: currentCatalog(), plan: f.plan, trialImages: f.trialImages,
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),
-        preferredPhotoIds,
+        preferredPhotoIds, photoComposition,
         photos: s.photos.filter(p => allowedPhotoIds.has(p.id))
           .map(p => ({ photoId: p.id, description: creativeContext.photoDescriptions[p.id] || "", name: p.name })),
         recentMessages: contextMessages(s).slice(-6).map(m => ({ role: m.role, text: m.text.slice(0, 650), photoIds: m.photoIds || [] })),
@@ -243,7 +255,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
             instructions: INSTRUCTIONS, input: [{ role: "user", content }], text: { format: { type: "json_schema", name: "company_assistant", strict: true, schema: outputSchema } } }) });
         const data = await response.json(); if (!response.ok || data.status && data.status !== "completed") fail("provider_unavailable", 503);
         const raw = (data.output || []).flatMap(v => v.content || []).filter(v => v.type === "output_text").map(v => v.text).join("");
-        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, f, allowedPhotoIds);
+        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, f, allowedPhotoIds,
+          helpOnly ? { mode: "separate", photoIds: [] } : photoComposition);
         const reply = conciseReply(helpOnly && out.items?.length ? "Me diga qual tela ou mensagem aparece para eu orientar o próximo passo." : out.reply, items.length);
         if (!reply) fail("provider_unavailable", 503);
         s = load(owner);
@@ -252,6 +265,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         for (const d of (helpOnly ? [] : out.photoDescriptions) || []) {
           if (allowedPhotoIds.has(d.photoId) && !liveContext.photoDescriptions[d.photoId]) liveContext.photoDescriptions[d.photoId] = text(d.description, 700);
         }
+        for (const item of items) if (sourceIds(item).length > 1) item.sourceDescriptions = sourceIds(item).map(id => liveContext.photoDescriptions[id] || "");
         if (items.length) s.draft = { id: crypto.randomUUID(), version: (s.draft?.version || 0) + 1, clientRequest: msg, items };
         else if (discardRequested(msg)) s.draft = null;
         if (items.length) s.assistanceTopic = "creation";
@@ -318,7 +332,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       let result;
       try {
         result = await calendar.generateImageCaption({ ticket: row.ticket, requestId: row.requestId,
-          guidance: row.imageText ? "Informação autorizada para a publicação: " + row.imageText : "",
+          guidance: [row.imageText ? "Informação autorizada para a publicação: " + row.imageText : "",
+            ...(sourceIds(row).length > 1 ? [row.visualInstructions || "", ...(row.sourceDescriptions || [])] : [])].filter(Boolean).join("\n").slice(0, 1700),
           ...(row.kind === "video" ? { mediaKind: "video" } : {}) },
         { path: path.join(folder(owner), row.photoId + ".png"), mimetype: "image/png" });
       } catch { fail("caption_preserved"); }
@@ -332,11 +347,12 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       ...(notes ? { notes } : {}),
       selections: [{ id: "93", format: row.kind }], mediaKind: row.kind, imageCaption: row.caption,
       imageSegment: row.segment, ...(row.imageText ? { imageText: row.imageText } : {}),
+      ...(sourceIds(row).length > 1 ? { imageComposition: { version: 1, mode: "combine", photoCount: sourceIds(row).length } } : {}),
       sextou: { businessType: "auto", date: null, copyId: "trabalho-sabor", durationSeconds: 10 },
       showcase: { videoId: MODELS[row.kind], videoVersion: 1 }, appCalendar: { ticket: row.ticket } };
     const body = new FormData(); body.set("data", JSON.stringify(data));
     body.set("logo", new Blob([fs.readFileSync(path.join(folder(owner), campaign.id + "-logo.png"))], { type: "image/png" }), "logo.png");
-    body.set("photos", new Blob([fs.readFileSync(path.join(folder(owner), row.photoId + ".png"))], { type: "image/png" }), "imagem.png");
+    for (const [index, id] of sourceIds(row).entries()) body.append("photos", new Blob([fs.readFileSync(path.join(folder(owner), id + ".png"))], { type: "image/png" }), sourceIds(row).length === 1 ? "imagem.png" : `imagem-${index + 1}.png`);
     row.state = "submitting"; save(owner, s);
     // Reuse the receiver's existing origin contract and stay below its twenty requests/minute limit.
     const dispatchClock = path.join(root, "dispatch-clock.json");
