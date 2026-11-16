@@ -18,7 +18,7 @@ const HELP_GUIDE = knowledgeGuide() + "GUIA DE AJUDA DO APP iA4tube: além de pr
   "Em Minhas imagens, Original usa a imagem enviada com a adaptação de formato existente; Modo iA4tube trabalha a arte com a logo e as informações. Cada imagem tem legenda e agendamento próprios. " +
   "No rodapé: Combo mostra os planos; Mais → Meus combos mostra o resumo do saldo; Mais → Pedidos mostra os pedidos. Não invente valores nem conceda créditos. " +
   "Mais → Perfil da empresa permite informar logo, segmento e contatos. Dentro dele, Minha conta mostra Google ou WhatsApp, o login e Copiar login, somente para consulta. " +
-  "Para abandonar só a preparação ainda não enviada, o cliente pode pedir Descarte esta proposta. Isso não cancela pedidos enviados à produção. " +
+  "Quando houver uma preparação aberta, o cliente escolhe dia, horário, formato e toca em Continuar. Mensagens nessa etapa recebem uma orientação pronta, sem alterar a preparação. Para limpar somente as artes ainda não enviadas e começar outra, envie Nova arte. O comando mantém logo, perfil, saldo e pedidos já enviados. Isso não cancela produção nem calendário. " +
   "Se faltar informação para ajudar, faça uma única pergunta curta sobre a tela ou a mensagem de erro. Em questões fora deste guia, não invente botões ou recursos.";
 
 const normalized = normalize;

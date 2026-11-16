@@ -2,6 +2,7 @@
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs"), os = require("node:os"), path = require("node:path"), crypto = require("node:crypto"), sharp = require("sharp");
 const { createAssistantService, MODEL } = require("../src/company-assistant/service");
 const { admissionOrderId } = require("../src/company-edit-calendar/admission-contract");
+const { PENDING_NOTICE } = require("../src/company-assistant/pending-preparation");
 const billing = require("../src/billing/billing.service"), plans = require("../src/billing/plans");
 const uuid = () => crypto.randomUUID(), hash = x => crypto.createHash("sha256").update(x).digest("hex");
 const NOW = Date.parse("2099-01-16T12:00:00Z"), OWNER = "159911205989";
@@ -29,11 +30,11 @@ async function fixture(t, options={}) {
   t.after(()=>{service.close();fs.rmSync(root,{recursive:true,force:true});});
   return {service,root,png,client,contextCalls,submissions,providerCalls,captionCalls,setOutput:o=>{output=o;}};
 }
-async function draft(f,kind="image") {
+async function draft(f,kind="image",overrides={},message="Crie uma oferta por R$ 39,90.") {
   const id=uuid();await f.service.upload(claims(),id,f.png,"foto.png");
   f.setOutput({reply:"Preparei esta publicação. Confira antes de criar.",photoDescriptions:[{photoId:id,description:"Produto fotografado em uma mesa."}],
-    items:[{photoId:id,kind,title:"Sua oferta",caption:"Confira nossa oferta!",imageText:"R$ 39,90",segment:"Comércio; visual limpo",date:"2099-01-17",time:"18:05",destination:"both"}]});
-  return f.service.message(claims(),{requestId:uuid(),message:"Crie uma oferta por R$ 39,90.",photoIds:[id]});
+    items:[{photoId:id,kind,title:"Sua oferta",caption:"Confira nossa oferta!",imageText:"R$ 39,90",segment:"Comércio; visual limpo",date:"2099-01-17",time:"18:05",destination:"both",...overrides}]});
+  return f.service.message(claims(),{requestId:uuid(),message,photoIds:[id]});
 }
 const confirmation = snapshot => ({draftId:snapshot.draft.id,version:snapshot.draft.version,confirmed:true,items:snapshot.draft.items.map(({id,date,time,destination})=>({id,date,time,destination}))});
 const tick=()=>new Promise(r=>setImmediate(r));
@@ -145,24 +146,23 @@ test("a provider cannot select a historical photo that is outside the current pr
   assert.equal((await f.service.state(claims())).draft,null);assert.equal(f.submissions.length,1);
 });
 
-test("adjustments within one unconfirmed preparation keep its photo, directions and original draft",async t=>{
+test("text adjustments in a pending preparation show the notice and preserve its exact photo and directions",async t=>{
   const f=await fixture(t),photoId=uuid();await f.service.upload(claims(),photoId,f.png,"foto.png");
   const output=proposal(photoId);output.items[0].visualInstructions="Fundo verde e logo no canto direito.";f.setOutput(output);
   const first=await f.service.message(claims(),{requestId:uuid(),message:"Quero fundo verde e logo no canto direito, preço 41,41",photoIds:[photoId]});
   f.setOutput({...output,items:[{...output.items[0],visualInstructions:"Fundo verde e logo no canto esquerdo."}]});
-  await f.service.message(claims(),{requestId:uuid(),message:"Mude só a logo para a esquerda",photoIds:[]});
-  const context=providerContext(f);assert.deepEqual(context.currentDraft,first.draft.items);
-  assert(context.recentMessages.some(m=>m.text.includes("fundo verde")));
-  assert.deepEqual(context.preferredPhotoIds,[photoId]);assert.equal(context.photos[0].description,"Hambúrguer fotografado sobre uma mesa.");
+  const after=await f.service.message(claims(),{requestId:uuid(),message:"Mude só a logo para a esquerda",photoIds:[]});
+  assert.deepEqual(after.draft,first.draft);assert.equal(after.messages.at(-1).text,PENDING_NOTICE);
+  assert.equal(f.providerCalls.length,1);
   assert.equal(f.submissions.length,0);
 });
 
 test("explicitly discarding an unsent preparation closes its creative context without deleting history",async t=>{
   const f=await fixture(t),first=await draft(f);f.setOutput({reply:"Preparação descartada.",photoDescriptions:[],items:[]});
-  const cleared=await f.service.message(claims(),{requestId:uuid(),message:"Cancele esta proposta",photoIds:[]});
+  const cleared=await f.service.message(claims(),{requestId:uuid(),message:"Nova arte",photoIds:[]});
   assert.equal(cleared.draft,null);assert(cleared.messages.length>=4);
   await f.service.message(claims(),{requestId:uuid(),message:"Quero uma nova arte",photoIds:[]});
-  assert.deepEqual(providerContext(f).photos,[]);assert.deepEqual(providerContext(f).recentMessages,[]);
+  assert.deepEqual(providerContext(f).photos,[]);assert(!JSON.stringify(providerContext(f).recentMessages).includes('39,90'));
   assert(cleared.photos.some(p=>p.id===first.draft.items[0].photoId));assert.equal(f.submissions.length,0);
 });
 test("confirmed image uses unchanged Modo iA4tube receiver and calendar entry once",async t=>{
@@ -214,11 +214,11 @@ test("video is one video quota and retains the established ten second model",asy
 });
 test("changing the conversation invalidates a discarded draft before creation",async t=>{
   const f=await fixture(t),s=await draft(f);f.setOutput({reply:"Certo, vamos mudar o planejamento.",photoDescriptions:[],items:[]});
-  await f.service.message(claims(),{requestId:uuid(),message:"Descarte esta proposta.",photoIds:[]});
+  await f.service.message(claims(),{requestId:uuid(),message:"Nova arte",photoIds:[]});
   await assert.rejects(f.service.confirm(claims(),confirmation(s)),{code:"assistant_draft_changed"});assert.equal(f.submissions.length,0);
 });
 test("one shared standalone credit cannot fund an image plus a video",async t=>{
-  const f=await fixture(t),s=await draft(f),p=s.draft.items[0].photoId;
+  const f=await fixture(t),p=uuid();await f.service.upload(claims(),p,f.png,"foto.png");
   f.client.artes_mensais_restantes=0;f.client.videos_mensais_restantes=0;f.client.artes_avulsas_restantes=1;
   const item={photoId:p,kind:"image",title:"Imagem",caption:"Oferta",imageText:null,segment:"Loja",date:null,time:null,destination:"both"};
   f.setOutput({reply:"Duas propostas",photoDescriptions:[],items:[item,{...item,kind:"video"}]});
@@ -299,7 +299,10 @@ test("invalid output kind is refused before calendar or production",async t=>{
 });
 
 test("last photo refers to the last submitted chat attachment, not an unused upload",async t=>{
-  const f=await fixture(t),s=await draft(f),shared=s.draft.items[0].photoId,unused=uuid();
+  const f=await fixture(t),shared=uuid(),unused=uuid();
+  await f.service.upload(claims(),shared,f.png,"foto.png");
+  f.setOutput({reply:"Diga o que quer criar.",photoDescriptions:[{photoId:shared,description:"Produto na mesa."}],items:[]});
+  await f.service.message(claims(),{requestId:uuid(),message:"Minha foto",photoIds:[shared]});
   await f.service.upload(claims(),unused,f.png,"foto-nao-enviada.png");
   f.setOutput({reply:"Vou usar a foto enviada.",photoDescriptions:[],items:[]});
   await f.service.message(claims(),{requestId:uuid(),message:"Use a última foto",photoIds:[]});
@@ -320,13 +323,13 @@ test("a completed receipt outside the visible history cannot close an unrelated 
   assert.equal(JSON.parse(fs.readFileSync(file,"utf8")).campaigns[0].status,"sent");assert.equal(f.submissions.length,1);
 });
 
-for (const kind of ["image", "video"]) test(`${kind}: Instagram help preserves the exact draft and its original one-time production confirmation`, async t => {
+for (const kind of ["image", "video"]) test(`${kind}: a pending-stage Instagram question shows the notice and preserves the original confirmation`, async t => {
   const f=await fixture(t),before=await draft(f,kind),client=structuredClone(f.client);
   const input={requestId:uuid(),message:"Como conectar meu Instagram?",photoIds:[]};
   const after=await f.service.message(claims(),input),repeat=await f.service.message(claims(),input);
-  assert.match(after.messages.at(-1).text,/ícone do Instagram.*esquerda/);
+  assert.equal(after.messages.at(-1).text,PENDING_NOTICE);
   assert.deepEqual(after.draft,before.draft);assert.deepEqual(repeat.draft,before.draft);
-  assert.equal(after.messagesUsed,before.messagesUsed+1);assert.equal(repeat.messagesUsed,after.messagesUsed);
+  assert.equal(after.messagesUsed,before.messagesUsed);assert.equal(repeat.messagesUsed,after.messagesUsed);
   assert.equal(f.providerCalls.length,1);assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
   assert.deepEqual(f.client,client);
   const body=confirmation(after),receipt=await f.service.confirm(claims(),body);
@@ -351,13 +354,12 @@ test("a general app question cannot replace the pending draft even if the model 
   const {id,requestId,...providerItem}=item;
   f.setOutput({reply:"Preparei outra publicação.",photoDescriptions:[],items:[{...providerItem,imageText:"Texto indevido"}]});
   const after=await f.service.message(claims(),{requestId:uuid(),message:"Por que meu app está mostrando esse aviso?",photoIds:[]});
-  assert.deepEqual(after.draft,before.draft);assert.match(after.messages.at(-1).text,/qual tela ou mensagem/);
-  const payload=JSON.parse(f.providerCalls.at(-1).body.input[0].content[0].text);
-  assert.equal(payload.requestMode,"app_help");assert.match(f.providerCalls.at(-1).body.instructions,/GUIA DE AJUDA DO APP/);
+  assert.deepEqual(after.draft,before.draft);assert.equal(after.messages.at(-1).text,PENDING_NOTICE);
+  assert.equal(f.providerCalls.length,1,'the pending-stage notice never calls the model');
   assert.equal(f.submissions.length,0);assert.equal(f.contextCalls.length,0);
 });
 
-test("a conversational reply without items preserves photo identity, schedule and captions until an explicit replacement", async t => {
+test("pending-stage conversation and price requests show the notice and preserve photo identity, schedule and captions", async t => {
   const f=await fixture(t),before=await draft(f);
   f.setOutput({reply:"Pode explicar o que você quer mudar?",photoDescriptions:[],items:[]});
   const after=await f.service.message(claims(),{requestId:uuid(),message:"Tenho uma dúvida",photoIds:[]});
@@ -365,9 +367,8 @@ test("a conversational reply without items preserves photo identity, schedule an
   const {id,requestId,...providerItem}=before.draft.items[0];
   f.setOutput({reply:"Preparei a nova versão.",photoDescriptions:[],items:[{...providerItem,imageText:"R$ 49,90"}]});
   const changed=await f.service.message(claims(),{requestId:uuid(),message:"Mude o valor para 49,90",photoIds:[]});
-  assert.notEqual(changed.draft.id,before.draft.id);assert.equal(changed.draft.version,before.draft.version+1);
-  assert.equal(changed.draft.items[0].imageText,"R$ 49,90");
-  await assert.rejects(f.service.confirm(claims(),confirmation(before)),{code:"assistant_draft_changed"});
+  assert.deepEqual(changed.draft,before.draft);assert.equal(changed.messages.at(-1).text,PENDING_NOTICE);
+  assert.equal(f.providerCalls.length,1);assert.equal(f.contextCalls.length,0);
 });
 
 test("asking how to cancel does not discard the proposal or create a calendar order", async t => {
@@ -384,24 +385,24 @@ test("app help retains the existing message and per-minute limits", async t => {
   assert.equal(f.providerCalls.length,0);assert.equal((await f.service.state(claims())).messagesUsed,6);
 });
 
-for (const kind of ["image", "video"]) test(`${kind}: discovery, price and plan help preserve the proposal through its original confirmation`, async t => {
+for (const kind of ["image", "video"]) test(`${kind}: pending-stage discovery and plan questions show the notice and preserve the original confirmation`, async t => {
   const f=await fixture(t),before=await draft(f,kind),client=structuredClone(f.client);
-  for (const [message,expected] of [
-    ["Eu vim pelo Instagram e queria saber mais sobre", /cria imagens e vídeos da sua empresa/],
-    ["Quero saber sobre esse app", /publica no Instagram nas datas/],
-    ["Quanto custa?", /R\$ 69.*R\$ 259/],
-    ["Qual plano tem 4 vídeos?", /Essencial.*R\$ 99.*4 vídeos/]
+  for (const message of [
+    "Eu vim pelo Instagram e queria saber mais sobre",
+    "Quero saber sobre esse app",
+    "Quanto custa?",
+    "Qual plano tem 4 vídeos?"
   ]) {
     const after=await f.service.message(claims(),{requestId:uuid(),message,photoIds:[]});
-    assert.match(after.messages.at(-1).text,expected);assert.deepEqual(after.draft,before.draft);
+    assert.equal(after.messages.at(-1).text,PENDING_NOTICE);assert.deepEqual(after.draft,before.draft);
   }
   assert.equal(f.providerCalls.length,1);assert.deepEqual(f.client,client);assert.equal(f.submissions.length,0);
   const body=confirmation(before);await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();
   await f.service.confirm(claims(),body);assert.equal(f.submissions.length,1);assert.equal(f.submissions[0].data.mediaKind,kind);
 });
 
-test("unknown app questions receive the catalog and account facts without changing billing or pending media", async t => {
-  const f=await fixture(t),before=await draft(f),client=structuredClone(f.client);
+test("unknown app questions on a fresh conversation receive catalog/account facts without billing changes", async t => {
+  const f=await fixture(t),before=await f.service.state(claims()),client=structuredClone(f.client);
   f.setOutput({reply:"O app prepara divulgações de diferentes ramos com suas fotos e informações.",photoDescriptions:[],items:[]});
   const after=await f.service.message(claims(),{requestId:uuid(),message:"Minha loja é de roupas. Como o app pode ajudar?",photoIds:[]});
   const payload=JSON.parse(f.providerCalls.at(-1).body.input[0].content[0].text);
@@ -412,9 +413,7 @@ test("unknown app questions receive the catalog and account facts without changi
 });
 
 for (const kind of ["image","video"]) test(`${kind}: blank caption uses My Images caption service once before the same receiver admission`,async t=>{
-  const f=await fixture(t),prepared=await draft(f,kind),{id,requestId,...item}=prepared.draft.items[0];
-  f.setOutput({reply:"Preparei a publicação.",photoDescriptions:[],items:[{...item,caption:""}]});
-  const blank=await f.service.message(claims(),{requestId:uuid(),message:"Prepare esta foto com a legenda automática.",photoIds:[]});
+  const f=await fixture(t),blank=await draft(f,kind,{caption:""});
   assert.equal(blank.draft.items[0].caption,"");assert.equal(f.captionCalls.length,0);
   const client=structuredClone(f.client),body=confirmation(blank),confirmed=await f.service.confirm(claims(),body);
   await tick();await f.service.processPending();await tick();await f.service.confirm(claims(),body);await f.service.processPending();
@@ -436,18 +435,14 @@ test("a customer caption is preserved exactly and never calls caption AI",async 
 });
 
 for(const option of ["captionFailure","blankCaption"])test(`${option}: no receiver submission or automatic repetition after unconfirmed caption`,async t=>{
-  const f=await fixture(t,{[option]:true}),s=await draft(f),{id,requestId,...item}=s.draft.items[0];
-  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[{...item,caption:""}]});
-  const blank=await f.service.message(claims(),{requestId:uuid(),message:"Prepare esta foto com legenda automática",photoIds:[]});
+  const f=await fixture(t,{[option]:true}),blank=await draft(f,"image",{caption:""});
   await f.service.confirm(claims(),confirmation(blank));await tick();await f.service.processPending();await tick();
   await f.service.processPending();assert.equal(f.captionCalls.length,1);assert.equal(f.submissions.length,0);
   const c=(await f.service.state(claims())).campaigns[0];assert.equal(c.status,"needs_attention");assert.equal(c.error,"assistant_caption_preserved");
 });
 
 test("a generated caption survives a later receiver failure and is not regenerated automatically",async t=>{
-  const f=await fixture(t,{submitFailure:true}),s=await draft(f),{id,requestId,...item}=s.draft.items[0];
-  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[{...item,caption:""}]});
-  const blank=await f.service.message(claims(),{requestId:uuid(),message:"Prepare a foto com a legenda automática",photoIds:[]});
+  const f=await fixture(t,{submitFailure:true}),blank=await draft(f,"image",{caption:""});
   await f.service.confirm(claims(),confirmation(blank));await tick();await f.service.processPending();await tick();await f.service.processPending();
   assert.equal(f.captionCalls.length,1);assert.equal(f.submissions.length,1);
   const stored=JSON.parse(fs.readFileSync(path.join(f.root,hash("assistant-v1\0"+OWNER),"state.json"),"utf8"));
@@ -455,11 +450,10 @@ test("a generated caption survives a later receiver failure and is not regenerat
 });
 
 for(const kind of ["image","video"])test(`${kind}: customer visual directions reach existing receiver notes separately from caption and visible text`,async t=>{
-  const f=await fixture(t),s=await draft(f,kind),{id,requestId,...item}=s.draft.items[0];
+  const f=await fixture(t);
   const message="Deixe o fundo mais verde-escuro, mantenha o lanche e coloque a logo pequena no canto direito.";
   const visualInstructions="Fundo verde-escuro; preservar o lanche e suas cores; logo pequena no canto direito; acabamento limpo.";
-  f.setOutput({reply:"Preparei.",photoDescriptions:[],items:[{...item,visualInstructions}]});
-  const changed=await f.service.message(claims(),{requestId:uuid(),message,photoIds:[]});
+  const changed=await draft(f,kind,{visualInstructions},message),item=changed.draft.items[0];
   assert.equal(changed.draft.clientRequest,message);assert.equal(changed.draft.items[0].visualInstructions,visualInstructions);
   await f.service.message(claims(),{requestId:uuid(),message:"Como conectar o Instagram?",photoIds:[]});
   const body=confirmation(changed);await f.service.confirm(claims(),body);await tick();await f.service.processPending();await tick();

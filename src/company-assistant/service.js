@@ -10,6 +10,7 @@ const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = requir
 const { accountPlan, currentCatalog, resolveProductReply } = require("./knowledge");
 const { creativeNotes } = require("./creative-brief");
 const { compositionContext, sourceIds } = require("./photo-composition");
+const { PENDING_NOTICE, isNewArtCommand, clearUnsentPreparation } = require("./pending-preparation");
 const { ensureCreativeContext, appendContextMessages, contextMessages, closeCreativeContext } = require("./creative-context");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
@@ -80,7 +81,6 @@ function conciseReply(value, itemCount = 0) {
   for (const sentence of sentences.slice(0, 2)) { if ((result + sentence).trim().length > 120) break; result += sentence; }
   return result.trim() || raw.slice(0, 116).replace(/\s+\S*$/, "") + "…";
 }
-const scheduleConfirmation = value => /^(sim|confirmo|confirmar|pode fazer|pode criar|pode continuar|continuar|ok)[.!\s]*$/i.test(value);
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
   clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500 }) {
@@ -197,16 +197,25 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     try {
       let s = load(owner); const prior = s.attempts[input.requestId];
       if (prior) { if (prior.fingerprint !== fingerprint) fail("request_conflict"); if (prior.state !== "completed") fail("attempt_preserved"); return wire(s, await facts(claims)); }
-      const creativeContext = ensureCreativeContext(s);
-      // A short acknowledgement preserves the existing draft. It never authorizes production.
-      if (s.draft?.items?.length && !input.photoIds.length && scheduleConfirmation(msg)) {
-        appendContextMessages(s, { id: input.requestId, role: "user", text: msg, photoIds: [] },
-          { id: crypto.randomUUID(), role: "assistant", text: "Toque em Continuar para escolher o dia e a hora.", photoIds: [] });
-        s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
-        save(owner, s); return wire(s, await facts(claims));
-      }
-      if (!apiKey) fail("provider_unavailable", 503);
       if (input.photoIds.some(id => !s.photos.some(p => p.id === id))) fail("photo_not_found", 404);
+      const restart = isNewArtCommand(msg);
+      if (restart || s.draft?.items?.length) {
+        // Obtain the ordinary read-only view before writing the command receipt.
+        const f = await facts(claims);
+        let reply = PENDING_NOTICE;
+        if (restart) {
+          const cleared = clearUnsentPreparation(s, input.requestId, clock());
+          reply = input.photoIds.length ? "Preparação reiniciada. Diga o que quer criar com as fotos que acabou de enviar."
+            : cleared ? "Limpei as artes ainda não enviadas. Envie a foto e o que quer na nova arte."
+              : "Vamos começar uma nova arte. Envie a foto e diga o que quer criar.";
+        }
+        appendContextMessages(s, { id: input.requestId, role: "user", text: msg || "Foto enviada", photoIds: input.photoIds },
+          { id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] });
+        s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
+        save(owner, s); return wire(s, f);
+      }
+      const creativeContext = ensureCreativeContext(s);
+      if (!apiKey) fail("provider_unavailable", 503);
       const t = rates.get(owner) || []; const recent = t.filter(at => at > clock() - 60000);
       if (recent.length >= 6) fail("rate_limit", 429); rates.set(owner, [...recent, clock()]);
       const f = await facts(claims), c = counters(s, f);
