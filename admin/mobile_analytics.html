@@ -82,6 +82,79 @@
       font-weight: 700;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab {
+      cursor: pointer;
+      min-height: 44px;
+      padding: 0 14px;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .tab[aria-selected="true"] {
+      color: var(--green);
+      border-bottom-color: var(--green);
+    }
+
+    .referral-controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .referral-controls h2 {
+      margin: 0;
+    }
+
+    .referral-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .referral-handle,
+    .referral-detail {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .referral-entries {
+      margin: 12px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .referral-entry {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 245px), 1fr));
+      gap: 12px;
+      padding: 12px 0;
+      border-top: 1px solid var(--line);
+      overflow-wrap: anywhere;
+    }
+
+    .referral-paid {
+      color: var(--green);
+    }
+
     .controls {
       display: grid;
       grid-template-columns: minmax(220px, 1fr) minmax(160px, 220px) auto;
@@ -387,11 +460,17 @@
     <header class="topbar">
       <div>
         <h1>Analytics Mobile IA4Tube</h1>
-        <p class="subtitle">Painel V1 para acompanhar funil, escolhas, pedidos e ações do app Android sem misturar com os eventos do site.</p>
+        <p id="analyticsSubtitle" class="subtitle">Painel V1 para acompanhar funil, escolhas, pedidos e ações do app Android sem misturar com os eventos do site.</p>
       </div>
-      <div class="badge">Somente eventos mobile_</div>
+      <div id="analyticsBadge" class="badge">Somente eventos mobile_</div>
     </header>
 
+    <div class="tabs" role="tablist" aria-label="Áreas do analisador">
+      <button id="analyticsTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="analyticsPanel">Analytics mobile</button>
+      <button id="referralsTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="referralsPanel" tabindex="-1">Indicações</button>
+    </div>
+
+    <div id="analyticsPanel" role="tabpanel" aria-labelledby="analyticsTab" tabindex="0">
     <section class="controls" aria-label="Filtros">
       <label>
         Token admin opcional
@@ -469,6 +548,26 @@
         </section>
       </aside>
     </section>
+    </div>
+
+    <div id="referralsPanel" role="tabpanel" aria-labelledby="referralsTab" tabindex="0" hidden>
+      <div class="referral-controls">
+        <h2>Indicações</h2>
+        <button id="reloadReferrals" class="primary" type="button">Atualizar</button>
+      </div>
+      <p id="referralsMessage" class="message" role="status"></p>
+      <div id="referralSummary" class="referral-summary" aria-label="Resumo das indicações" hidden>
+        <article class="card">
+          <div class="metric-title">Clientes indicados</div>
+          <div id="referralCount" class="metric-value"></div>
+        </article>
+        <article class="card">
+          <div class="metric-title">Com compra paga</div>
+          <div id="referralPaidCount" class="metric-value"></div>
+        </article>
+      </div>
+      <div id="referralPartners"></div>
+    </div>
   </main>
 
   <script>
@@ -768,6 +867,132 @@
       }
     }
 
+    const referralDate = new Intl.DateTimeFormat("pt-BR", {
+      dateStyle: "short",
+      timeStyle: "short",
+      timeZone: "America/Sao_Paulo"
+    });
+
+    let referralsLoading = false;
+    let referralsLoaded = false;
+
+    function referralText(tag, value, className) {
+      const element = document.createElement(tag);
+      element.textContent = value;
+      if (className) element.className = className;
+      return element;
+    }
+
+    function formatReferralDate(value) {
+      const date = new Date(value || "");
+      return Number.isNaN(date.getTime()) ? "Data indisponível" : referralDate.format(date);
+    }
+
+    function showReferralsMessage(message, error = false) {
+      const element = $("referralsMessage");
+      element.textContent = message;
+      element.className = message ? "message show" + (error ? " error" : "") : "message";
+    }
+
+    function renderReferrals(report) {
+      $("referralCount").textContent = formatNumber(report.totals.referrals);
+      $("referralPaidCount").textContent = formatNumber(report.totals.customersWithPurchase);
+      $("referralSummary").hidden = false;
+      const groups = document.createDocumentFragment();
+      for (const partner of report.partners) {
+        const group = document.createElement("section");
+        group.className = "section";
+        group.append(
+          referralText("h2", partner.name),
+          referralText("p", partner.handle, "referral-handle")
+        );
+        const entries = document.createElement("ul");
+        entries.className = "referral-entries";
+        for (const referral of partner.referrals) {
+          const entry = document.createElement("li");
+          entry.className = "referral-entry";
+          const customer = document.createElement("div");
+          customer.append(
+            referralText("strong", referral.name),
+            referralText("p", referral.loginLabel, "referral-detail"),
+            referralText("p", "Indicação em " + formatReferralDate(referral.referredAt), "referral-detail")
+          );
+          const purchases = document.createElement("div");
+          const paid = referral.purchases.length > 0;
+          purchases.append(referralText("strong", paid ? "Compra paga" : "Sem compra paga", paid ? "referral-paid" : ""));
+          for (const purchase of referral.purchases) {
+            purchases.append(referralText("p", purchase.planName + " · " + formatReferralDate(purchase.paidAt), "referral-detail"));
+          }
+          entry.append(customer, purchases);
+          entries.append(entry);
+        }
+        group.append(entries);
+        groups.append(group);
+      }
+      $("referralPartners").replaceChildren(groups);
+      showReferralsMessage(report.totals.referrals === 0 ? "Nenhuma indicação registrada." : "");
+    }
+
+    async function loadReferrals() {
+      if (referralsLoading) return;
+      referralsLoading = true;
+      referralsLoaded = false;
+      const button = $("reloadReferrals");
+      button.disabled = true;
+      button.textContent = "Carregando…";
+      $("referralSummary").hidden = true;
+      $("referralPartners").replaceChildren();
+      showReferralsMessage("Carregando indicações…");
+      try {
+        const response = await fetch("/bot/mobile-analytics/referrals", { credentials: "same-origin" });
+        if (response.status === 401 || response.status === 403) {
+          showReferralsMessage("Sessão encerrada. Entre novamente no analisador.", true);
+          return;
+        }
+        if (!response.ok) throw new Error("referral_report");
+        const report = await response.json();
+        if (!report.ok || !report.totals || !Array.isArray(report.partners)) throw new Error("referral_report");
+        renderReferrals(report);
+        referralsLoaded = true;
+      } catch {
+        $("referralSummary").hidden = true;
+        showReferralsMessage("Não foi possível carregar as indicações. Tente atualizar.", true);
+      } finally {
+        referralsLoading = false;
+        button.disabled = false;
+        button.textContent = "Atualizar";
+      }
+    }
+
+    const analyticsTabs = [$("analyticsTab"), $("referralsTab")];
+    function selectAnalyticsTab(selected) {
+      for (const tab of analyticsTabs) {
+        const active = tab === selected;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+        $(tab.getAttribute("aria-controls")).hidden = !active;
+      }
+      const referralsActive = selected === $("referralsTab");
+      $("analyticsSubtitle").hidden = referralsActive;
+      $("analyticsBadge").hidden = referralsActive;
+      if (referralsActive && !referralsLoaded) loadReferrals();
+    }
+
+    analyticsTabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => selectAnalyticsTab(tab));
+      tab.addEventListener("keydown", (event) => {
+        let next;
+        if (event.key === "Home") next = analyticsTabs[0];
+        if (event.key === "End") next = analyticsTabs[analyticsTabs.length - 1];
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") next = analyticsTabs[1 - index];
+        if (!next) return;
+        event.preventDefault();
+        selectAnalyticsTab(next);
+        next.focus();
+      });
+    });
+
+    $("reloadReferrals").addEventListener("click", loadReferrals);
     $("date").value = todayLocal();
     $("load").addEventListener("click", loadAnalytics);
     render([]);

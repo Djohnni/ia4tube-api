@@ -24,6 +24,7 @@ const orderStatus = require("./src/orders/order.status");
 const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
+const { buildReferralReport } = require("./src/company-assistant/referral-report");
 const { assertPixIssuanceAllowed, sendBlockedPixError } = require("./src/billing/pix-account-policy");
 const { createCompanyProfileRouter } = require("./src/company-profile/router");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
@@ -610,6 +611,20 @@ app.get("/bot/mobile-analytics", mobileAnalyticsPanelAuth, (_req, res) => {
 
   res.setHeader("Cache-Control", "no-store");
   return res.sendFile(ADMIN_MOBILE_ANALYTICS_FILE);
+});
+
+app.get("/bot/mobile-analytics/referrals", botAdminAuth, async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const report = await buildReferralReport({
+      dataDir: DATA_DIR,
+      readClients: readClientes,
+      readPayments: readMpProcessados
+    });
+    return res.json(report);
+  } catch {
+    return res.status(503).json({ ok: false, error: "Não foi possível consultar as indicações agora." });
+  }
 });
 
 function maskSensitiveIdentifier(value = "") {
