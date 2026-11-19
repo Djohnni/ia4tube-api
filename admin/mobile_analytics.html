@@ -111,6 +111,7 @@
 
     .referral-controls {
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       align-items: flex-start;
       gap: 12px;
@@ -119,6 +120,43 @@
 
     .referral-controls h2 {
       margin: 0;
+    }
+
+    .referral-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .referral-secondary {
+      min-height: 44px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel-2);
+      color: var(--text);
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .referral-secondary:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .partner-form {
+      margin-bottom: 18px;
+    }
+
+    .partner-form h3 {
+      margin: 0 0 14px;
+    }
+
+    .partner-fields {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+      gap: 14px;
+      margin-bottom: 14px;
     }
 
     .referral-summary {
@@ -553,8 +591,27 @@
     <div id="referralsPanel" role="tabpanel" aria-labelledby="referralsTab" tabindex="0" hidden>
       <div class="referral-controls">
         <h2>Indicações</h2>
-        <button id="reloadReferrals" class="primary" type="button">Atualizar</button>
+        <div class="referral-actions">
+          <button id="addPartner" class="referral-secondary" type="button" aria-expanded="false" aria-controls="partnerForm">Adicionar parceiro</button>
+          <button id="reloadReferrals" class="primary" type="button">Atualizar</button>
+        </div>
       </div>
+      <form id="partnerForm" class="card partner-form" aria-labelledby="partnerFormTitle" hidden>
+        <h3 id="partnerFormTitle">Adicionar parceiro</h3>
+        <div class="partner-fields">
+          <label>Nome
+            <input id="partnerName" type="text" required autocomplete="off">
+          </label>
+          <label>@ do Instagram
+            <input id="partnerHandle" type="text" required autocomplete="off" autocapitalize="none" spellcheck="false">
+          </label>
+        </div>
+        <div class="referral-actions">
+          <button id="savePartner" class="primary" type="submit">Salvar</button>
+          <button id="cancelPartner" class="referral-secondary" type="button">Cancelar</button>
+        </div>
+      </form>
+      <p id="partnerMessage" class="message" role="status"></p>
       <p id="referralsMessage" class="message" role="status"></p>
       <div id="referralSummary" class="referral-summary" aria-label="Resumo das indicações" hidden>
         <article class="card">
@@ -964,6 +1021,77 @@
       }
     }
 
+    function showPartnerMessage(message, kind = "") {
+      const element = $("partnerMessage");
+      element.textContent = message;
+      element.className = message ? "message show " + kind : "message";
+    }
+
+    function setPartnerFormOpen(open) {
+      const form = $("partnerForm");
+      const button = $("addPartner");
+      form.hidden = !open;
+      button.setAttribute("aria-expanded", String(open));
+      showPartnerMessage("");
+      if (open) {
+        $("partnerName").focus();
+      } else {
+        form.reset();
+        if (!$("referralsPanel").hidden) button.focus();
+      }
+    }
+
+    const partnerStatusMessages = {
+      400: "Confira o nome e o @ do Instagram.",
+      401: "Sessão encerrada. Entre novamente no analisador.",
+      403: "Acesso negado. Entre novamente no analisador.",
+      409: "Já existe um parceiro com esse @."
+    };
+
+    async function savePartner(event) {
+      event.preventDefault();
+      const nameInput = $("partnerName");
+      const handleInput = $("partnerHandle");
+      const button = $("savePartner");
+      if (button.disabled) return;
+      const name = nameInput.value.trim();
+      const handle = handleInput.value.trim();
+      if (!name || !handle) {
+        showPartnerMessage(partnerStatusMessages[400], "error");
+        (name ? handleInput : nameInput).focus();
+        return;
+      }
+      const controls = [nameInput, handleInput, button, $("cancelPartner"), $("addPartner")];
+      controls.forEach((control) => { control.disabled = true; });
+      button.textContent = "Salvando…";
+      showPartnerMessage("Salvando parceiro…");
+      try {
+        const response = await fetch("/bot/mobile-analytics/referral-partners", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, handle })
+        });
+        if (partnerStatusMessages[response.status]) {
+          showPartnerMessage(partnerStatusMessages[response.status], "error");
+          return;
+        }
+        if (response.status !== 201) throw new Error("partner_save");
+        const result = await response.json();
+        if (!result.ok || !result.partner?.name || !result.partner?.handle) throw new Error("partner_save");
+        setPartnerFormOpen(false);
+        showPartnerMessage(result.partner.name + " (" + result.partner.handle + ") será exibido entre as opções da primeira conversa após o cadastro.", "ok");
+      } catch {
+        showPartnerMessage("Não foi possível salvar o parceiro. Tente novamente.", "error");
+      } finally {
+        controls.forEach((control) => { control.disabled = false; });
+        button.textContent = "Salvar";
+        if (!$("referralsPanel").hidden) {
+          ($("partnerForm").hidden ? $("addPartner") : button).focus();
+        }
+      }
+    }
+
     const analyticsTabs = [$("analyticsTab"), $("referralsTab")];
     function selectAnalyticsTab(selected) {
       for (const tab of analyticsTabs) {
@@ -993,6 +1121,9 @@
     });
 
     $("reloadReferrals").addEventListener("click", loadReferrals);
+    $("addPartner").addEventListener("click", () => setPartnerFormOpen(true));
+    $("cancelPartner").addEventListener("click", () => setPartnerFormOpen(false));
+    $("partnerForm").addEventListener("submit", savePartner);
     $("date").value = todayLocal();
     $("load").addEventListener("click", loadAnalytics);
     render([]);

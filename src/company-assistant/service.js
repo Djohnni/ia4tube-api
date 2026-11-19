@@ -84,9 +84,9 @@ function conciseReply(value, itemCount = 0) {
 }
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
-  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500, referralPartners = [] }) {
+  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500, listReferralPartners = () => [] }) {
   const busy = new Set(), rates = new Map(); let stopped = false, timer = null, running = false;
-  const referrals = createReferralStore(root, referralPartners);
+  const referrals = createReferralStore(root, listReferralPartners);
   function session(claims) {
     const owner = claims?.whatsapp;
     if (!enabled) fail("unavailable", 403);

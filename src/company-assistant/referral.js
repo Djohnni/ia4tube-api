@@ -22,7 +22,7 @@ function question(record) {
   return ["Quem indicou você para a iA4tube?", "", ...lines, "", instructions].join("\n");
 }
 
-function createReferralStore(root, partners) {
+function createReferralStore(root, listPartners) {
   // The order dispatcher scans the main assistant directory for owner folders.
   const directory = path.join(root, "referrals");
   const file = ownerHash => path.join(directory, ownerHash + ".json");
@@ -41,6 +41,7 @@ function createReferralStore(root, partners) {
   }
 
   function start(ownerHash) {
+    const partners = listPartners();
     if (partners.length === 0) return null;
     const record = { partners, offset: 0, outcome: "pending", messages: [], requests: {} };
     record.messages.push(bubble(question(record)));
@@ -60,8 +61,13 @@ function createReferralStore(root, partners) {
       response = question(record);
     } else {
       const number = /^[1-9][0-9]*\.?$/.test(command) ? Number(command.replace(/\.$/, "")) : 0;
-      const partner = choices(record).find(({ handle, name }, index) =>
-        number === record.offset + index + 1 || command === handle.toLowerCase() || command === name.toLowerCase());
+      const page = choices(record);
+      const names = !number && !command.startsWith("@")
+        ? record.partners.filter(({ name }) => command === name.toLowerCase())
+        : [];
+      const partner = page.find(({ handle }, index) =>
+        number === record.offset + index + 1 || command === handle.toLowerCase())
+        || (names.length === 1 && page.includes(names[0]) ? names[0] : null);
       if (!partner) return false;
       record.outcome = "selected";
       record.attribution = { ...partner, at };

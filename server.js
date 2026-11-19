@@ -25,6 +25,7 @@ const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
 const { buildReferralReport } = require("./src/company-assistant/referral-report");
+const { createReferralPartnerDirectory } = require("./src/company-assistant/referral-partners");
 const { assertPixIssuanceAllowed, sendBlockedPixError } = require("./src/billing/pix-account-policy");
 const { createCompanyProfileRouter } = require("./src/company-profile/router");
 const graphicMaterialsService = require("./src/company-graphic-materials/materials.service");
@@ -88,6 +89,11 @@ const productionSession = createProductionSession({ secret: JWT_SECRET, readClie
 
 // ===== DATA STORAGE (RENDER DISK) =====
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
+const ASSISTANT_DIR = path.join(DATA_DIR, "company_assistant_v1");
+const referralPartners = createReferralPartnerDirectory({
+  root: ASSISTANT_DIR,
+  initialPartners: [{ name: "Los Hermanos", handle: "@los_hermanos_ls" }]
+});
 
 const PEDIDOS_DIR = path.join(DATA_DIR, "pedidos");
 const TMP_UPLOADS_DIR = path.join(DATA_DIR, "tmp_uploads");
@@ -624,6 +630,28 @@ app.get("/bot/mobile-analytics/referrals", botAdminAuth, async (_req, res) => {
     return res.json(report);
   } catch {
     return res.status(503).json({ ok: false, error: "Não foi possível consultar as indicações agora." });
+  }
+});
+
+app.post("/bot/mobile-analytics/referral-partners", botAdminAuth, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.get("origin") !== new URL(PUBLIC_API_BASE_URL).origin) {
+    return res.status(403).json({ ok: false, error: "Abra a aba Indicações para cadastrar o parceiro." });
+  }
+  if (!req.is("application/json")) {
+    return res.status(400).json({ ok: false, error: "Informe o nome e o @ do Instagram." });
+  }
+  try {
+    const partner = referralPartners.add(req.body);
+    return res.status(201).json({ ok: true, partner });
+  } catch (error) {
+    if (error.code === "referral_partner_invalid") {
+      return res.status(400).json({ ok: false, error: "Confira o nome e o @ do Instagram." });
+    }
+    if (error.code === "referral_partner_exists") {
+      return res.status(409).json({ ok: false, error: "Já existe um parceiro com esse @." });
+    }
+    return res.status(503).json({ ok: false, error: "Não foi possível salvar o parceiro agora." });
   }
 });
 
@@ -4185,8 +4213,8 @@ app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunne
 
 // Authenticated company assistant. It creates ordinary Edit requests; it never publishes to Meta.
 const companyAssistant = require("./src/company-assistant/service").createAssistantService({
-  root: path.join(DATA_DIR, "company_assistant_v1"),
-  referralPartners: [{ name: "Los Hermanos", handle: "@los_hermanos_ls" }],
+  root: ASSISTANT_DIR,
+  listReferralPartners: referralPartners.list,
   enabled: process.env.IA4TUBE_ASSISTANT_ENABLED !== "false",
   readClient: owner => readClientes()[owner],
   profile: require("./src/company-profile/service").createCompanyProfileService({ baseDir: path.join(DATA_DIR, "company_profiles") }),

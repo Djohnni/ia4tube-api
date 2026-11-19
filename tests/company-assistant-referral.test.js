@@ -8,6 +8,7 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const sharp = require("sharp");
 const { createAssistantService } = require("../src/company-assistant/service");
+const { createReferralPartnerDirectory } = require("../src/company-assistant/referral-partners");
 
 const NOW = Date.parse("2099-01-16T12:00:00Z");
 const GOOGLE = "google_new";
@@ -34,9 +35,9 @@ function fixture(t) {
   };
   const providerCalls = [];
   const services = [];
-  function start(referralPartners, apiKey) {
+  function start(referralPartners, apiKey, listReferralPartners = () => referralPartners) {
     const service = createAssistantService({
-      root, referralPartners, apiKey,
+      root, apiKey, listReferralPartners,
       clock: () => NOW,
       readClient: owner => clients[owner],
       profile: { get: () => ({ profile: { ramo: "Hamburgueria" } }) },
@@ -69,6 +70,23 @@ function fixture(t) {
   });
   return { root, clients, providerCalls, start };
 }
+
+test("a partner saved in the panel is offered in the next first chat, without changing an earlier list", async t => {
+  const { root, start } = fixture(t);
+  const directory = createReferralPartnerDirectory({ root, initialPartners: PARTNERS.slice(0, 5) });
+  const service = start([], undefined, directory.list);
+  const earlier = await service.state(claims(GOOGLE));
+  assert.doesNotMatch(lastText(earlier), /Mais nomes/);
+
+  directory.add(PARTNERS[5]);
+  assert.deepEqual((await service.state(claims(GOOGLE))).messages, earlier.messages);
+  const fresh = await service.state(claims(WHATSAPP));
+  assert.match(lastText(fresh), /Mais nomes/);
+  const secondPage = await service.message(claims(WHATSAPP), request("Mais nomes"));
+  assert.match(lastText(secondPage), /6\. Parceiro 6 · @parceiro_6/);
+  await service.message(claims(WHATSAPP), request("6"));
+  assert.deepEqual(readReferral(root, WHATSAPP).attribution, { ...PARTNERS[5], at: NOW });
+});
 
 test("a new account sees the one stored option without spending quota or creating an order folder", async t => {
   const { root, providerCalls, start } = fixture(t);
