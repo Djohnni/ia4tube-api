@@ -12,6 +12,7 @@ const { creativeNotes } = require("./creative-brief");
 const { compositionContext, sourceIds } = require("./photo-composition");
 const { PENDING_NOTICE, isNewArtCommand, clearUnsentPreparation } = require("./pending-preparation");
 const { ensureCreativeContext, appendContextMessages, contextMessages, closeCreativeContext } = require("./creative-context");
+const { createReferralStore } = require("./referral");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -83,15 +84,20 @@ function conciseReply(value, itemCount = 0) {
 }
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
-  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500 }) {
+  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500, referralPartners = [] }) {
   const busy = new Set(), rates = new Map(); let stopped = false, timer = null, running = false;
-  function account(claims) {
+  const referrals = createReferralStore(root, referralPartners);
+  function session(claims) {
     const owner = claims?.whatsapp;
     if (!enabled) fail("unavailable", 403);
-    if (typeof owner !== "string" || !owner || owner !== claims?.company_id || claims.token_version !== 2 || readClient(owner)?.ativo !== true) fail("session_required", 401);
-    return owner;
+    if (typeof owner !== "string" || !owner || owner !== claims?.company_id || claims.token_version !== 2) fail("session_required", 401);
+    const client = readClient(owner);
+    if (client?.ativo !== true) fail("session_required", 401);
+    return { owner, client };
   }
-  const folder = owner => path.join(root, hash("assistant-v1\0" + owner));
+  const account = claims => session(claims).owner;
+  const ownerHash = owner => hash("assistant-v1\0" + owner);
+  const folder = owner => path.join(root, ownerHash(owner));
   function load(owner) {
     const file = path.join(folder(owner), "state.json");
     if (!fs.existsSync(file)) return { schema: 1, revision: 0, messages: [], photos: [], attempts: {}, campaigns: [], counters: {} };
@@ -119,7 +125,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     return { ...l, images: imageCount, trialImages: trial, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {} };
   }
   function counters(s, l) { return s.counters[l.period] ||= { messages: 0, usd: 0 }; }
-  function wire(s, f) { const c = s.counters[f.period] || { messages: 0, usd: 0 }, messages = s.messages.slice(-40); return { ok: true, revision: s.revision,
+  function wire(s, f, referral) { const c = s.counters[f.period] || { messages: 0, usd: 0 }, messages = [...(referral?.messages || []), ...s.messages].slice(-40); return { ok: true, revision: s.revision,
     messages, photos: s.photos.slice(-40).map(({ id, name }) => ({ id, name })), draft: s.draft || null,
     campaigns: s.campaigns.map(c => {
       const next = s.messages.findIndex(m => m.role === "user" && s.attempts[m.id]?.at > c.createdAt);
@@ -130,7 +136,23 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     capabilities: CAPABILITIES,
     images: f.images, storyImages: f.storyImages, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, businessType: f.profile?.ramo || "", messageLimit: f.messages,
     messagesUsed: c.messages, budgetReached: c.usd + .01 > f.budgetUsd }; }
-  async function state(claims) { const owner = account(claims); return wire(load(owner), await facts(claims)); }
+  function referralFor(client, owner, start = false) {
+    if (client.assistant_referral_eligible !== true) return null;
+    try {
+      const key = ownerHash(owner);
+      return referrals.read(key) || (start ? referrals.start(key) : null);
+    } catch {
+      // Optional onboarding must stay independent from the creation chat.
+      return null;
+    }
+  }
+  const beforeFirstConversation = s => s.messages.length === 0 && !s.draft && s.campaigns.length === 0;
+  async function state(claims) {
+    const { owner, client } = session(claims);
+    const f = await facts(claims);
+    const s = load(owner);
+    return wire(s, f, referralFor(client, owner, beforeFirstConversation(s)));
+  }
   async function upload(claims, id, bytes, name) {
     const owner = account(claims); if (!UUID.test(id) || !Buffer.isBuffer(bytes) || !bytes.length || bytes.length > 5 * 1024 * 1024) fail("photo_invalid", 400);
     if (busy.has(owner)) fail("busy"); busy.add(owner);
@@ -183,21 +205,33 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       fail("balance_required", 402);
   }
   function report(claims, input) {
-    const owner = account(claims); fields(input, ["messageId"]);
-    const s = load(owner); if (!UUID.test(input.messageId) || !s.messages.some(m => m.id === input.messageId && m.role === "assistant")) fail("input_invalid", 400);
+    const { owner, client } = session(claims); fields(input, ["messageId"]);
+    if (!UUID.test(input.messageId)) fail("input_invalid", 400);
+    if (referrals.report(ownerHash(owner), referralFor(client, owner), input.messageId, clock())) return { ok: true };
+    const s = load(owner); if (!s.messages.some(m => m.id === input.messageId && m.role === "assistant")) fail("input_invalid", 400);
     s.reports ||= []; if (!s.reports.some(r => r.messageId === input.messageId)) { s.reports.push({ messageId: input.messageId, at: clock() }); save(owner, s); }
     return { ok: true };
   }
   async function message(claims, input) {
-    const owner = account(claims); fields(input, ["requestId", "message", "photoIds"]);
+    const { owner, client } = session(claims); fields(input, ["requestId", "message", "photoIds"]);
     if (!UUID.test(input.requestId) || !Array.isArray(input.photoIds) || input.photoIds.length > 4 || new Set(input.photoIds).size !== input.photoIds.length) fail("input_invalid", 400);
     const msg = text(input.message || "", 2000); if (!msg && !input.photoIds.length) fail("input_invalid", 400);
     const fingerprint = hash(JSON.stringify({ msg, ids: input.photoIds }));
     if (busy.has(owner)) fail("busy"); busy.add(owner);
     try {
       let s = load(owner); const prior = s.attempts[input.requestId];
-      if (prior) { if (prior.fingerprint !== fingerprint) fail("request_conflict"); if (prior.state !== "completed") fail("attempt_preserved"); return wire(s, await facts(claims)); }
+      const referral = referralFor(client, owner);
+      const priorReferral = referral?.requests[input.requestId];
+      if (prior || priorReferral) {
+        if ((prior?.fingerprint || priorReferral) !== fingerprint) fail("request_conflict");
+        if (prior && prior.state !== "completed") fail("attempt_preserved");
+        return wire(s, await facts(claims), referral);
+      }
       if (input.photoIds.some(id => !s.photos.some(p => p.id === id))) fail("photo_not_found", 404);
+      if (beforeFirstConversation(s) && !input.photoIds.length &&
+          referrals.reply(ownerHash(owner), referral, { message: msg, requestId: input.requestId, fingerprint, at: clock() })) {
+        return wire(s, await facts(claims), referral);
+      }
       const restart = isNewArtCommand(msg);
       if (restart || s.draft?.items?.length) {
         // Obtain the ordinary read-only view before writing the command receipt.
@@ -212,7 +246,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         appendContextMessages(s, { id: input.requestId, role: "user", text: msg || "Foto enviada", photoIds: input.photoIds },
           { id: crypto.randomUUID(), role: "assistant", text: reply, photoIds: [] });
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
-        save(owner, s); return wire(s, f);
+        save(owner, s); return wire(s, f, referral);
       }
       const creativeContext = ensureCreativeContext(s);
       if (!apiKey) fail("provider_unavailable", 503);
@@ -231,7 +265,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
           { id: crypto.randomUUID(), role: "assistant", text: helpReply, photoIds: [] });
         s.assistanceTopic = productReply?.topic || (/instagram|insta/i.test(msg) ? "connection" : s.assistanceTopic || "app_help");
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
-        save(owner, s); return wire(s, f);
+        save(owner, s); return wire(s, f, referral);
       }
       const preferredPhotoIds = input.photoIds.length ? input.photoIds : creativeContext.lastPhotoIds.length ? creativeContext.lastPhotoIds : s.draft?.items?.flatMap(sourceIds) || [];
       const photoComposition = compositionContext(msg, input.photoIds, preferredPhotoIds, s.draft);
@@ -284,7 +318,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         if (!Number.isFinite(usd) || usd < 0 || usd > .05) fail("usage_unconfirmed", 503);
         counters(s, f).usd += usd - .01;
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usage: { input: usage.input_tokens, output: usage.output_tokens }, usd }; save(owner, s);
-        return wire(s, f);
+        return wire(s, f, referral);
       } catch (e) { const latest = load(owner); if (latest.attempts[input.requestId]?.state === "requested") { latest.attempts[input.requestId].state = "uncertain"; save(owner, latest); } if (e.code?.startsWith("assistant_")) throw e; fail("attempt_preserved", 503); }
     } finally { busy.delete(owner); }
   }

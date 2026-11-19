@@ -1943,6 +1943,7 @@ app.post("/auth/google", async (req, res) => {
         artes_avulsas_consumos: [],
         usados_no_ciclo: 0,
         ciclo_mes: nowYYYYMM(),
+        assistant_referral_eligible: true,
         ativo: true
       };
       billingService.markFreeArtEligible(c);
@@ -2092,6 +2093,7 @@ app.post("/auth/register", async (req, res, next) => {
     artes_avulsas_consumos: [],
     usados_no_ciclo: 0,
     ciclo_mes: nowYYYYMM(),
+    assistant_referral_eligible: true,
     ativo: true
   };
   billingService.markFreeArtEligible(novo);
@@ -4169,6 +4171,7 @@ app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunne
 // Authenticated company assistant. It creates ordinary Edit requests; it never publishes to Meta.
 const companyAssistant = require("./src/company-assistant/service").createAssistantService({
   root: path.join(DATA_DIR, "company_assistant_v1"),
+  referralPartners: [{ name: "Los Hermanos", handle: "@los_hermanos_ls" }],
   enabled: process.env.IA4TUBE_ASSISTANT_ENABLED !== "false",
   readClient: owner => readClientes()[owner],
   profile: require("./src/company-profile/service").createCompanyProfileService({ baseDir: path.join(DATA_DIR, "company_profiles") }),
