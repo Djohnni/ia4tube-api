@@ -796,7 +796,7 @@ function validatePlanAndFreeArts(cliente, quantity, options = {}) {
   const freeArtBlocked = options?.freeArtBlocked === true;
   const freeArtOptions = { freeArtBlocked,
     instagramFreeClaim: options?.instagramFreeClaim === true && options.mediaKind === "image",
-    instagramFreeClaimLimit: options?.instagramFreeClaimLimit === 3 ? 3 : 1 };
+    instagramFreeClaimLimit: [3, 5].includes(options?.instagramFreeClaimLimit) ? options.instagramFreeClaimLimit : 1 };
   const billing = billingService.getBillingStatus(cliente, freeArtOptions);
   const standalone = billingService.getStandaloneArtStatus(cliente);
   ensurePlanningReservationState(cliente, planCycle(cliente));
@@ -1557,8 +1557,8 @@ function createRequest({ baseDir, cliente, whatsapp, body = {}, files = {}, free
     mediaKind: editRegistration ? editRegistration.mediaKind || "video" : "image",
     instagramFreeClaim: instagramFreeClaim === true && editRegistration?.kind === "edit_calendar_admission_v1" &&
       editRegistration.mediaKind === "image",
-    instagramFreeClaimLimit: instagramFreeClaimLimit === 3 && instagramFreeClaim === true &&
-      editRegistration?.kind === "edit_calendar_admission_v1" && editRegistration.mediaKind === "image" ? 3 : 1 };
+    instagramFreeClaimLimit: [3, 5].includes(instagramFreeClaimLimit) && instagramFreeClaim === true &&
+      editRegistration?.kind === "edit_calendar_admission_v1" && editRegistration.mediaKind === "image" ? instagramFreeClaimLimit : 1 };
   const { billing, charge } = validatePlanAndFreeArts(cliente, quantidadeReservada, billingOptions);
   const ciclo = planCycle(cliente);
   const planningId = editRegistration ? `pm_edit_${editRegistration.contextId.replace(/-/g, "")}` : newPlanningId();

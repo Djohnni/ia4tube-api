@@ -2,7 +2,7 @@
 const { knowledgeGuide, normalize, productQuestion, resolveProductReply } = require("./knowledge");
 
 // Navigation guidance only. No authorization, publication, billing or calendar actions.
-const HELP_GUIDE = knowledgeGuide() + "GUIA DE AJUDA DO APP iA4tube: além de preparar publicações, ensine a usar os recursos reais do app. " +
+const NAVIGATION_GUIDE = "GUIA DE AJUDA DO APP iA4tube: além de preparar publicações, ensine a usar os recursos reais do app. " +
   "Dúvidas de uso não são pedidos de criação: responda só à dúvida, com items vazio, preservando a preparação atual. Quando requestMode=app_help, responda apenas à ajuda. Uma pergunta nunca confirma, cancela ou envia uma arte. " +
   "Explique um passo por vez, em uma ou duas frases curtas, até 120 caracteres. Não despeje um tutorial completo. " +
   "Na home há três ícones acima da conversa: Instagram à esquerda; iA4tube/Posts prontos no centro; calendário à direita. " +
@@ -21,6 +21,8 @@ const HELP_GUIDE = knowledgeGuide() + "GUIA DE AJUDA DO APP iA4tube: além de pr
   "Quando houver uma preparação aberta, o cliente escolhe dia, horário, formato e toca em Continuar. Mensagens nessa etapa recebem uma orientação pronta, sem alterar a preparação. Para limpar somente as artes ainda não enviadas e começar outra, envie Nova arte. O comando mantém logo, perfil, saldo e pedidos já enviados. Isso não cancela produção nem calendário. " +
   "Se faltar informação para ajudar, faça uma única pergunta curta sobre a tela ou a mensagem de erro. Em questões fora deste guia, não invente botões ou recursos.";
 
+const helpGuide = storyPackage => knowledgeGuide(storyPackage) + NAVIGATION_GUIDE;
+const HELP_GUIDE = helpGuide();
 const normalized = normalize;
 
 function isHelpQuestion(value) {
@@ -69,4 +71,4 @@ function discardRequested(value) {
     /^nao quero mais (?:esta|essa|a|minha|o|meu|esse|este) (?:proposta|rascunho|preparacao)$/.test(s);
 }
 
-module.exports = { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested };
+module.exports = { HELP_GUIDE, helpGuide, isHelpQuestion, simpleHelpReply, discardRequested };

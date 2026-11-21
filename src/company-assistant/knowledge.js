@@ -1,7 +1,9 @@
 "use strict";
 const plans = require("../billing/plans");
+const { LEGACY_STORY_PACKAGE } = require("../billing/story-quota");
 const normalize = value => String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
 const money = value => "R$ " + new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 2 }).format(value);
+const storyPrice = pack => "R$ " + pack.amount.toFixed(2).replace(".", ",");
 const currentCatalog = () => plans.listPlans().map(p => ({ id: p.id, name: p.name, price: p.price,
   images: p.imagesPerMonth, videos: p.videosPerMonth }));
 
@@ -11,8 +13,8 @@ function accountPlan(client, active) {
     renewsAt: typeof client?.plano_renova_em === "string" && Number.isFinite(Date.parse(client.plano_renova_em)) ? client.plano_renova_em : null };
 }
 
-function knowledgeGuide() {
-  return "PACOTE AVULSO: 5 imagens exclusivamente para Stories por R$ 19,90, sem renovação. storyImages é saldo restrito: não use em Feed nem vídeo. Se só houver esse saldo, prepare imagem com destination story. " +
+function knowledgeGuide(storyPackage = LEGACY_STORY_PACKAGE) {
+  return `PACOTE AVULSO: ${storyPackage.quantity} imagens exclusivamente para Stories por ${storyPrice(storyPackage)}, sem renovação. storyImages é saldo restrito: não use em Feed nem vídeo. Se só houver esse saldo, prepare imagem com destination story. ` +
     "CONHECIMENTO DO PRODUTO iA4tube: ajude também quem ainda está conhecendo ou avaliando o app, não só quem já quer criar. " +
     "A iA4tube reduz o trabalho de montar e programar divulgações: cria imagens e vídeos com as fotos, marca e informações da empresa e publica no Instagram nas datas escolhidas, após confirmação e autorização. " +
     "O cliente não precisa editar manualmente nem aparecer no vídeo. Pode divulgar produtos, serviços e o ambiente; não restrinja a alimentação. Não prometa vendas, seguidores, alcance ou prazo exato. " +
@@ -21,7 +23,7 @@ function knowledgeGuide() {
     "OFERTA ATUAL (mensal, inclui postagem automática; não venda os preços históricos): " + JSON.stringify(currentCatalog()) + ". " +
     "Uma criação de vídeo usa uma cota de vídeo, não uma imagem adicional. Imagens e vídeos têm cotas separadas nos planos novos. O mesmo pedido em Feed/Reel e Story não vira automaticamente duas criações cobradas. " +
     "Cotas reais e plano informado são fatos da sessão. Não invente o saldo, a data de validade ou um pagamento aprovado. Se não receber esses dados, diga como consultar. Pix gerado não é pagamento confirmado. Recomprar o mesmo plano ativo pode programar o próximo ciclo, não liberar mais cotas na hora. Não ofereça desconto, cupom, reembolso, refação grátis ou crédito sem condição confirmada. " +
-    "TESTE: há benefício de imagens para contas elegíveis com Instagram confirmado; pode alcançar três no total no chat, considerando a antiga gratuidade. Não são três extras para todos, não é concedido só por cadastrar e não inclui vídeo grátis. Use trialImages quando fornecido; sem ele, explique a condição sem prometer quantidade. " +
+    "TESTE: previewStatus=available permite uma primeira imagem grátis para baixar, sem conexão. Com previewStatus presente, o bônus é de até cinco imagens mediante conexão elegível. Com previewStatus nulo, vale o teste anterior de até três no total. Use trialImages como saldo real e não prometa créditos adicionais se a conta já os usou. O teste é para imagens. " +
     "FOTOS: clipe ou câmera; até quatro fotos por envio. Foto nítida de celular serve. O chat precisa de foto; não transfira a opção sem foto de alguns modelos da vitrine para o chat. Produto real e logo são referências, não prometa reprodução perfeita. Preço e texto só com informação explícita do cliente. Pode criar legenda e hashtags conforme a foto e o direcionamento. " +
     "VÍDEOS DO CHAT: foto vira vídeo suave de 10 segundos, com música e sem fala. Não recebe vídeo pronto para editar, não faz narração/voz do cliente ou duração diferente. Não ofereça seleção de música famosa do Instagram. Funções do programa Brindes no PC não são automaticamente funções deste chat. " +
     "CAMINHOS: Posts prontos é a vitrine de modelos, não a rede TikTok. Minhas imagens oferece Original, com adaptação de formato, ou Modo iA4tube, que trabalha a arte com a marca. Cada imagem tem legenda e agendamento próprios. O calendário recebe o resultado pelo fluxo existente, não por uma publicação direta do chat. " +
@@ -55,7 +57,10 @@ function productQuestion(value) {
 const planReply = p => `O ${p.name} custa ${money(p.price)}/mês e inclui ${p.images} imagens${p.videos ? ` e ${p.videos} vídeos` : ""}, com postagem automática.`;
 function resolveProductReply(value, facts = {}, context = {}) {
   if (!productQuestion(value)) return null;
-  if (/stor(?:y|ies)/i.test(value) && /(?:pre[cç]o|quanto|pacote|valor)/i.test(value)) return { topic: "plans", reply: "Temos 5 imagens para Stories por R$ 19,90. É um pacote avulso, sem mensalidade." };
+  if (/stor(?:y|ies)/i.test(value) && /(?:pre[cç]o|quanto|pacote|valor)/i.test(value)) {
+    const storyPackage = facts.storyPackage || LEGACY_STORY_PACKAGE;
+    return { topic: "plans", reply: `Temos ${storyPackage.quantity} imagens para Stories por ${storyPrice(storyPackage)}. É um pacote avulso, sem mensalidade.` };
+  }
   const s = normalize(value), instagram = /\b(?:instagram|insta)\b/.test(s);
   const topic = context.topic || "";
   const introduction = /\b(?:vim|cheguei|vi|encontrei)\b.*\b(?:anuncio|instagram|insta)\b/.test(s) &&
@@ -100,6 +105,10 @@ function resolveProductReply(value, facts = {}, context = {}) {
   }
   if (/\b(?:teste|testar|gratis|gratuito|gratuita|brinde)\b/.test(s)) {
     if (/\b(?:video|videos)\b/.test(s)) return { topic: "trial", reply: "O teste identificado nesse fluxo é de imagens. Não há promessa de vídeo grátis." };
+    if (facts.preview?.status === "available" && !facts.connected)
+      return { topic: "trial", reply: "Você pode baixar 1 arte grátis. Conecte um Instagram elegível para ganhar mais 5 imagens." };
+    if (facts.preview?.status === "ready" && !facts.preview.downloaded)
+      return { topic: "trial", reply: "Sua primeira arte grátis está pronta. Toque em Baixar imagem." };
     if (Number.isInteger(facts.trialImages) && facts.trialImages > 0)
       return { topic: "trial", reply: `Esta conta tem ${facts.trialImages} imagem(ns) de teste disponíveis. O benefício depende da conexão e elegibilidade.` };
     return { topic: "trial", reply: "Há imagens de teste para contas elegíveis após conectar o Instagram. A quantidade depende do benefício disponível." };

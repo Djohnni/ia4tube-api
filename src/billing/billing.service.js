@@ -295,11 +295,12 @@ function getFreeArtStatus(cliente, options = {}) {
   const used = cliente?.arte_gratis_usada === true ||
     (Boolean(cliente?.arte_gratis_pedido_id) || Number(cliente?.arte_gratis_usos?.length || 0) > 0);
   const blocked = options?.freeArtBlocked === true;
-  // Only the verified Edit admission may spend the shared one-time benefit.
+  const limit = [3, 5].includes(options?.instagramFreeClaimLimit) ? options.instagramFreeClaimLimit : 1;
+  // Only verified Edit admission may spend the shared Instagram benefit.
   // A legacy signup flag is not an authorization to create a free order.
   const available = options?.instagramFreeClaim === true && freeArtFeatureEnabled() &&
-    !blocked && (used !== true || options.instagramFreeClaimLimit === 3 &&
-      Math.max(1, Number(cliente?.arte_gratis_usos?.length || 0)) < 3) && cliente?.arte_gratis_disponivel === true;
+    !blocked && (used !== true || Math.max(1, Number(cliente?.arte_gratis_usos?.length || 0)) < limit) &&
+    cliente?.arte_gratis_disponivel === true;
 
   return {
     arte_gratis_ativa: freeArtFeatureEnabled(),
@@ -377,7 +378,7 @@ function getBillingStatus(cliente, now = new Date(), options = {}) {
     ...freeArt,
     ...standaloneArt,
     stories_avulsos_restantes: require("./story-quota").remaining(cliente),
-    pacote_stories: require("./story-quota").STORY_PACKAGE,
+    pacote_stories: options.storyPackage || require("./story-quota").LEGACY_STORY_PACKAGE,
     saldo_mensal: roundMoney(cliente.saldo_mensal || 0),
     saldo_extra: roundMoney(cliente.saldo_extra || 0),
     saldo: getAvailableBalance(cliente),

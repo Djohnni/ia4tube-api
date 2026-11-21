@@ -24,6 +24,7 @@ const orderStatus = require("./src/orders/order.status");
 const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
+const promoRollout = require("./src/billing/promo-rollout").createPromoRollout();
 const { buildReferralReport } = require("./src/company-assistant/referral-report");
 const { createReferralPartnerDirectory } = require("./src/company-assistant/referral-partners");
 const { assertPixIssuanceAllowed, sendBlockedPixError } = require("./src/billing/pix-account-policy");
@@ -2334,7 +2335,8 @@ app.get("/me", auth, (req, res) => {
     carrosseis_ciclo: c.carrosseis_ciclo || "",
     carrosseis_criados: c.carrosseis_criados || null
   });
-  const billing = billingService.getBillingStatus(c, { freeArtBlocked: freeArtIpLock.blocked });
+  const billing = billingService.getBillingStatus(c, { freeArtBlocked: freeArtIpLock.blocked,
+    storyPackage: promoRollout.storyPackageFor(req.user.whatsapp) });
   const carrosselUsage = carouselService.carouselUsagePayload(c);
   const carrosselCycleAfter = JSON.stringify({
     carrosseis_ciclo: c.carrosseis_ciclo || "",
@@ -2364,6 +2366,7 @@ app.get("/me", auth, (req, res) => {
     imageQuota: billing.imageQuota,
     videoQuota: billing.videoQuota,
     stories_avulsos_restantes: billing.stories_avulsos_restantes,
+    pacote_stories: billing.pacote_stories,
     artes_avulsas_restantes: billing.artes_avulsas_restantes,
     artes_avulsas_usadas: billing.artes_avulsas_usadas,
     artes_avulsas_total_compradas: billing.artes_avulsas_total_compradas,
@@ -2699,7 +2702,7 @@ app.post("/bot/notificacoes/teste", botRunnerAuth, async (req, res) => {
 // ===== MERCADO PAGO =====
 const storyCheckout = require("./src/billing/story-checkout").createStoryCheckout({
   root: path.join(DATA_DIR, "private", "story-purchases"), readClients: readClientes, writeClients: writeClientes,
-  issuePix: createMercadoPagoPixPayment, assertAllowed: assertPixIssuanceAllowed
+  issuePix: createMercadoPagoPixPayment, assertAllowed: assertPixIssuanceAllowed, storyPackageFor: promoRollout.storyPackageFor
 });
 
 async function createMercadoPagoPixPayment({ amount, description, payerKey, externalReference, metadata, idempotencyKey }) {
@@ -2767,7 +2770,7 @@ app.get("/billing/status", auth, (req, res) => {
 
   return res.json({
     ok: true,
-    ...billingService.getBillingStatus(c)
+    ...billingService.getBillingStatus(c, { storyPackage: promoRollout.storyPackageFor(req.user.whatsapp) })
   });
 });
 
@@ -4190,6 +4193,7 @@ const editCalendarService = createEditCalendarService({ dataDir: DATA_DIR, plann
   readyImageFeedAdapter: require("./src/company-edit-calendar/ready-image-feed-adaptation")
     .createReadyImageFeedAdapter({ apiKey: process.env.OPENAI_API_KEY }),
   admissionEnabled: process.env.IA4TUBE_EDIT_ADMISSION_ENABLED === "true",
+  instagramBonusEnabled: promoRollout.welcomeArtFor,
   observeConnection: verifiedClaims => productionSocialIntegration.observeEditConnection(verifiedClaims),
   writeClients: value => atomicWriteJson(CLIENTES_FILE, value),
   prepareCalendarRequest: claims => productionSocialIntegration.prepareEditCalendarRequest(claims),
@@ -4214,6 +4218,9 @@ app.use(createEditCalendarRouter({ authenticate: auth, botAuthenticate: botRunne
 // Authenticated company assistant. It creates ordinary Edit requests; it never publishes to Meta.
 const companyAssistant = require("./src/company-assistant/service").createAssistantService({
   root: ASSISTANT_DIR,
+  welcomeArtRoot: promoRollout.startWelcomeArt ? path.join(DATA_DIR, "private", "company_welcome_art") : null,
+  welcomeArtFor: promoRollout.welcomeArtFor,
+  storyPackageFor: promoRollout.storyPackageFor,
   listReferralPartners: referralPartners.list,
   enabled: process.env.IA4TUBE_ASSISTANT_ENABLED !== "false",
   readClient: owner => readClientes()[owner],

@@ -3,6 +3,7 @@
 const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), os = require("node:os");
 const planning = require("../company-monthly-planning/planning.service");
 const { allocationUnits, matchesAllocation } = require("./media-allocation");
+const { createEditAdmissionService, INSTAGRAM_BONUS_LIMIT } = require("./admission");
 const { dateTime, caption: calendarCaption } = require("../social/calendar/model");
 const { atomicWriteJson } = require("../notifications/fcm-token-store");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -65,7 +66,7 @@ function read(file, maximum = 32768) {
 function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, readClients, writeClients,
   prepareCalendarRequest, currentFreeArtBlocked = () => false, recordFreeArtUse = () => true,
   canReuseCancelledFreeArt = () => false,
-  admissionEnabled = false, observeConnection = null, clock = Date.now, fault = () => {}, readyImageFeedAdapter = null,
+  admissionEnabled = false, instagramBonusEnabled = false, observeConnection = null, clock = Date.now, fault = () => {}, readyImageFeedAdapter = null,
   imageCaptionOptions = {} }) {
   if (typeof readClients !== "function" || typeof writeClients !== "function" || typeof prepareCalendarRequest !== "function" ||
       typeof secret !== "string" || secret.length < 32) fail("configuration_invalid", 503);
@@ -104,7 +105,7 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
     if (!crypto.timingSafeEqual(Buffer.from(hash(parsed[2]), "hex"), Buffer.from(row.ticketHash, "hex"))) fail("context_unavailable", 404);
     return row;
   }
-  const admission = require("./admission").createEditAdmissionService({ enabled: admissionEnabled, root, contextFile,
+  const admission = createEditAdmissionService({ enabled: admissionEnabled, instagramBonusEnabled, root, contextFile,
     claimFile: id => path.join(orders, `${id}.json`), read, write: atomicWriteJson, directories, acquireLock,
     ownerClient, ticketContext, billingDigest, planningRoot, orderRoot, readClients, writeClients,
     observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret, clock, fault });
@@ -277,7 +278,8 @@ function createEditCalendarService({ dataDir, planningDir, ordersDir, secret, re
       writeClients(current.clients);
       fault("after_client_commit");
       const consumedFreeArt = Number(current.client.planejamento_mensal_reservas?.[row.planningId]?.artes_gratis_consumidas || 0) > 0;
-      if (consumedFreeArt && row.ipIdentity && recordFreeArtUse({ owner: row.owner, planningId: row.planningId, ipIdentity: row.ipIdentity }) !== true)
+      if (consumedFreeArt && row.admission?.freeClaim?.limit !== INSTAGRAM_BONUS_LIMIT && row.ipIdentity &&
+          recordFreeArtUse({ owner: row.owner, planningId: row.planningId, ipIdentity: row.ipIdentity }) !== true)
         fail("free_art_receipt_unconfirmed", 503);
       admission.finishBind(row);
       row.phase = "bound"; row.boundAt = clock(); atomicWriteJson(contextFile(id), row);

@@ -255,6 +255,53 @@ test("signup never emits the retired generic gift and never resets consumed lega
   } finally { if (old === undefined) delete process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY; else process.env.IA4TUBE_FREE_ART_POLICY_INSTAGRAM_ONLY = old; }
 });
 const freeClient = { plano_status: "none", artes_mensais_restantes: 0, arte_gratis_disponivel: false, arte_gratis_usada: false, arte_gratis_usos: [] };
+test("five connected image reservations use the trusted bonus marker exactly once; it never grants video", async t => {
+  const f = fixture(t, { client: freeClient, instagramBonusEnabled: owner => owner === "synthetic-owner" });
+  const claims = { whatsapp: f.owner, sub: f.owner, company_id: f.owner, token_version: 2 };
+  const connection = { provider: "instagram", state: "connected", health: "healthy", accountType: "creator", externalId: "123456789012345" };
+  f.setConnection(null);
+  assert.equal(await f.service.assistantTrialRemaining(claims), 0);
+  const first = f.body((await f.context()).ticket);
+  await assert.rejects(f.service.admit(first), { code: "billing_required" });
+  f.setConnection(connection);
+  assert.equal(await f.service.assistantTrialRemaining(claims), 5);
+  assert.equal(await f.service.assistantTrialRemaining({ whatsapp: f.other }), 3);
+  const held = [];
+  for (let index = 0; index < 5; index++) {
+    const request = index ? f.body((await f.context()).ticket) : first;
+    const reserved = await f.service.admit(request);
+    assert.equal(reserved.admission.imageBenefit, "instagram_bonus");
+    assert.deepEqual(await f.service.admit(request), reserved);
+    assert.deepEqual(f.status(request), reserved);
+    assert.equal(await f.service.assistantTrialRemaining(claims), 4 - index);
+    held.push(request);
+  }
+  const sixth = f.body((await f.context()).ticket);
+  await assert.rejects(f.service.admit(sixth), { code: "billing_required" });
+  const video = f.body((await f.context()).ticket, "video");
+  await assert.rejects(f.service.admit(video), { code: "billing_required" });
+  const other = f.body((await f.context(f.other)).ticket);
+  await assert.rejects(f.service.admit(other), { code: "billing_required" });
+  await f.cancel(held[1]);
+  await f.cancel(held[1]);
+  assert.equal(await f.service.assistantTrialRemaining(claims), 1);
+  assert.equal((await f.service.admit(sixth)).admission.imageBenefit, "instagram_bonus");
+  await f.service.bind(f.bindBody(first));
+  assert.equal(f.status(first).admission.imageBenefit, "instagram_bonus");
+  f.setConnection(null);
+  assert.equal(await f.service.assistantTrialRemaining(claims), 0);
+  f.setConnection(connection);
+  assert.equal(await f.service.assistantTrialRemaining(claims), 0);
+  assert.equal(f.readClients()[f.owner].arte_gratis_usos.length, 5);
+});
+test("ordinary images have no bonus marker and historic connection credits count toward five", async t => {
+  const paid = fixture(t, { instagramBonusEnabled: true });
+  const regular = await paid.service.admit(paid.body((await paid.context()).ticket));
+  assert.equal(Object.hasOwn(regular.admission, "imageBenefit"), false);
+  const prior = fixture(t, { instagramBonusEnabled: true,
+    client: { ...freeClient, arte_gratis_usada: true, arte_gratis_usos: [{ pedido_id: "historical" }] } });
+  assert.equal(await prior.service.assistantTrialRemaining({ whatsapp: prior.owner }), 4);
+});
 test("trusted assistant offers three image trials in total and the fourth cannot reserve", async t => {
   const f = fixture(t, { client: freeClient });
   const claims = {whatsapp:f.owner,sub:f.owner,company_id:f.owner,token_version:2};

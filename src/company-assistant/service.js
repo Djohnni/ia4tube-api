@@ -6,13 +6,14 @@ const billing = require("../billing/billing.service");
 const storyQuota = require("../billing/story-quota");
 const { dateTime, caption } = require("../social/calendar/model");
 const { admissionOrderId } = require("../company-edit-calendar/admission-contract");
-const { HELP_GUIDE, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
+const { helpGuide, isHelpQuestion, simpleHelpReply, discardRequested } = require("./help");
 const { accountPlan, currentCatalog, resolveProductReply } = require("./knowledge");
 const { creativeNotes } = require("./creative-brief");
 const { compositionContext, sourceIds } = require("./photo-composition");
 const { PENDING_NOTICE, isNewArtCommand, clearUnsentPreparation } = require("./pending-preparation");
 const { ensureCreativeContext, appendContextMessages, contextMessages, closeCreativeContext } = require("./creative-context");
 const { createReferralStore } = require("./referral");
+const { createWelcomeArt } = require("./welcome-art");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -63,7 +64,7 @@ const INSTRUCTIONS = "Você é o assistente da iA4tube para preparar publicaçõ
   "Imagem é padrão; vídeo somente quando pedido, com 10 segundos. Não ultrapasse as cotas. Distribua as publicações nos próximos 30 dias quando o cliente pedir o mês, " +
   "sugerindo datas futuras e horários de Brasília diferentes. Nunca garanta melhor horário com dados que não temos. Se faltar horário para um item, deixe null para o cliente escolher. " +
   "Feed e Story são padrão (both). A aplicação validará antes da criação. Quando houver items, reply só avisa que estão preparados e orienta tocar em Continuar. Se precisar perguntar algo indispensável antes de uma proposta, retorne items vazio. " +
-  "Descreva brevemente as novas fotos em photoDescriptions, de forma visual e neutra, sem nomes comerciais ou preços; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial e do uso do app. A marca é exatamente iA4tube. " + HELP_GUIDE;
+  "Descreva brevemente as novas fotos em photoDescriptions, de forma visual e neutra, sem nomes comerciais ou preços; não repita a descrição das já descritas. Não ofereça tarefas fora de divulgação empresarial e do uso do app. A marca é exatamente iA4tube. ";
 
 // Bound the displayed reply without another provider call or touching captions/draft data.
 function conciseReply(value, itemCount = 0) {
@@ -84,9 +85,14 @@ function conciseReply(value, itemCount = 0) {
 }
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
-  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500, listReferralPartners = () => [] }) {
+  clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500, listReferralPartners = () => [],
+  welcomeArtRoot = null, welcomeArtFetch = globalThis.fetch, welcomeArtFor = () => false,
+  storyPackageFor = () => storyQuota.LEGACY_STORY_PACKAGE }) {
   const busy = new Set(), rates = new Map(); let stopped = false, timer = null, running = false;
   const referrals = createReferralStore(root, listReferralPartners);
+  const welcomeArt = welcomeArtRoot && createWelcomeArt({
+    root: welcomeArtRoot, apiKey, fetchImpl: welcomeArtFetch, canRun: owner => welcomeArtFor(owner) && readClient(owner)?.ativo === true
+  });
   function session(claims) {
     const owner = claims?.whatsapp;
     if (!enabled) fail("unavailable", 403);
@@ -122,7 +128,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       (availability.availability?.canImage === true && l.images === 0 ? 1 : 0);
     const imageCount = l.images + trial + l.storyImages;
     let p = { profile: {} }; try { p = profile.get(owner); } catch {}
-    return { ...l, images: imageCount, trialImages: trial, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {} };
+    return { ...l, images: imageCount, trialImages: trial, connected, hasLogo: p.profile?.has_logo === true, profile: p.profile || {},
+      storyPackage: storyPackageFor(owner), ...(welcomeArt && welcomeArtFor(owner) ? { preview: welcomeArt.state(ownerHash(owner)) } : {}) };
   }
   function counters(s, l) { return s.counters[l.period] ||= { messages: 0, usd: 0 }; }
   function wire(s, f, referral) { const c = s.counters[f.period] || { messages: 0, usd: 0 }, messages = [...(referral?.messages || []), ...s.messages].slice(-40); return { ok: true, revision: s.revision,
@@ -133,7 +140,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       return { id: c.id, status: c.status, sent: c.items.filter(i => i.state === "sent").length, total: c.items.length,
         afterMessageId: c.afterMessageId || legacyAnchor, error: c.error || null };
     }).filter(c => c.status !== "sent" || messages.some(m => m.id === c.afterMessageId)),
-    capabilities: CAPABILITIES,
+    capabilities: CAPABILITIES, ...(f.preview ? { preview: f.preview } : {}),
     images: f.images, storyImages: f.storyImages, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, businessType: f.profile?.ramo || "", messageLimit: f.messages,
     messagesUsed: c.messages, budgetReached: c.usd + .01 > f.budgetUsd }; }
   function referralFor(client, owner, start = false) {
@@ -174,6 +181,60 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     } finally { busy.delete(owner); }
   }
   function photo(claims, id) { const owner = account(claims); if (!UUID.test(id) || !load(owner).photos.some(p => p.id === id)) fail("photo_not_found", 404); return fs.readFileSync(path.join(folder(owner), id + ".png")); }
+  function previewKey(claims) {
+    const owner = account(claims);
+    if (!welcomeArt || !welcomeArtFor(owner)) fail("preview_unavailable", 403);
+    return ownerHash(owner);
+  }
+  function preview(claims) {
+    const key = previewKey(claims);
+    return { ok: true, preview: welcomeArt.state(key) };
+  }
+  function previewImage(claims) {
+    const key = previewKey(claims);
+    return welcomeArt.image(key);
+  }
+  function previewDownloaded(claims) {
+    const key = previewKey(claims);
+    return { ok: true, preview: welcomeArt.downloaded(key) };
+  }
+  function startPreview(claims, input) {
+    const key = previewKey(claims), owner = account(claims);
+    fields(input, ["draftId", "revision", "photoId"]);
+    if (!UUID.test(input.draftId) || !UUID.test(input.photoId) || !Number.isSafeInteger(input.revision))
+      fail("input_invalid", 400);
+    if (busy.has(owner)) fail("busy");
+    const s = load(owner), d = s.draft;
+    const status = welcomeArt.state(key);
+    const item = d?.id === input.draftId && d.version === input.revision &&
+      d.items.find(row => row.photoId === input.photoId && row.kind === "image");
+    if (!item) {
+      // A refresh or repeated tap may arrive after the current draft was already cleared.
+      if (status.status !== "available") return { ok: true, preview: status };
+      fail("preview_draft_changed");
+    }
+    const photos = sourceIds(item).map(id => photo(claims, id));
+    const logo = profile.get(owner)?.profile?.has_logo === true ? profile.logo(owner) : null;
+    const instructions = [
+      "Crie uma única arte promocional vertical, com acabamento profissional no estilo iA4tube.",
+      "Use como referência as fotos anexadas. Preserve os produtos, as características e as quantidades que aparecem nas fotos.",
+      logo ? "A última imagem é a logo da empresa. Integre-a ao design sem modificar sua escrita ou seu símbolo." : "Crie a arte sem inventar marca ou logo.",
+      "Use os dados do pedido abaixo como referência visual. Não acrescente preços, ofertas, nomes de empresa, selos ou fatos que o cliente não forneceu.",
+      item.segment && item.segment !== "auto" ? `Segmento: ${item.segment}` : "",
+      item.visualInstructions ? `Orientação visual: ${item.visualInstructions}` : "",
+      item.imageText ? `Texto exato que deve aparecer na arte: ${item.imageText}` : "",
+      "Mantenha os textos legíveis, com bom contraste e margens. Equilibre a composição sem poluir. Entregue somente a arte."
+    ].filter(Boolean).join("\n");
+    const result = welcomeArt.reserve(key, { ...input, owner, photos, logo, instructions });
+    const remaining = d.items.filter(row => row.id !== item.id);
+    if (remaining.length) s.draft = { ...d, version: d.version + 1, items: remaining };
+    else {
+      s.draft = null;
+      closeCreativeContext(s, d.id);
+    }
+    save(owner, s);
+    return { ok: true, preview: result };
+  }
   function validateItems(items, s, f, allowedPhotoIds, composition) {
     if (!Array.isArray(items) || items.length > Math.min(35, f.images + f.videos)) fail("draft_invalid", 400);
     const result = items.map((v, n) => {
@@ -213,7 +274,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     return { ok: true };
   }
   async function message(claims, input) {
-    const { owner, client } = session(claims); fields(input, ["requestId", "message", "photoIds"]);
+    const { owner, client } = session(claims); fields(input, ["requestId", "message", "photoIds", "previewEnabled"]);
+    if (input.previewEnabled !== undefined && typeof input.previewEnabled !== "boolean") fail("input_invalid", 400);
     if (!UUID.test(input.requestId) || !Array.isArray(input.photoIds) || input.photoIds.length > 4 || new Set(input.photoIds).size !== input.photoIds.length) fail("input_invalid", 400);
     const msg = text(input.message || "", 2000); if (!msg && !input.photoIds.length) fail("input_invalid", 400);
     const fingerprint = hash(JSON.stringify({ msg, ids: input.photoIds }));
@@ -267,12 +329,20 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         s.attempts[input.requestId] = { fingerprint, state: "completed", at: clock(), usd: 0 };
         save(owner, s); return wire(s, f, referral);
       }
-      const preferredPhotoIds = input.photoIds.length ? input.photoIds : creativeContext.lastPhotoIds.length ? creativeContext.lastPhotoIds : s.draft?.items?.flatMap(sourceIds) || [];
-      const photoComposition = compositionContext(msg, input.photoIds, preferredPhotoIds, s.draft);
+      let preferredPhotoIds = input.photoIds.length ? input.photoIds : creativeContext.lastPhotoIds.length ? creativeContext.lastPhotoIds : s.draft?.items?.flatMap(sourceIds) || [];
+      let photoComposition = compositionContext(msg, input.photoIds, preferredPhotoIds, s.draft);
+      const onlyPreview = input.previewEnabled === true && !helpOnly && f.preview?.status === "available" &&
+        (!f.connected || (f.images === 0 && f.videos === 0));
+      const creation = onlyPreview ? { ...f, images: 1, storyImages: 0, videos: 0, standalone: 0 } : f;
+      if (onlyPreview && photoComposition.mode === "separate") {
+        preferredPhotoIds = preferredPhotoIds.slice(0, 1);
+        photoComposition = { ...photoComposition, photoIds: photoComposition.photoIds.slice(0, 1) };
+      }
       const allowedPhotoIds = new Set([...creativeContext.photoIds, ...input.photoIds]);
       const content = [{ type: "input_text", text: JSON.stringify({ today: new Intl.DateTimeFormat("en-CA", {timeZone:"America/Sao_Paulo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(clock())),
         nowUtc: new Date(clock()).toISOString(), timezone: "America/Sao_Paulo",
-        images: f.images, storyImages: f.storyImages, videos: f.videos, connected: f.connected, hasLogo: f.hasLogo, profile: f.profile,
+        images: creation.images, storyImages: creation.storyImages, videos: creation.videos, connected: f.connected,
+        downloadablePreview: onlyPreview, previewStatus: f.preview?.status || null, hasLogo: f.hasLogo, profile: f.profile,
         capabilities: CAPABILITIES, requestMode: helpOnly ? "app_help" : "creation_or_conversation",
         conversationTopic: s.assistanceTopic || null, currentCatalog: currentCatalog(), plan: f.plan, trialImages: f.trialImages,
         recentOrders: s.campaigns.slice(-3).map(c => ({ status: c.status, received: c.items.filter(i => i.state === "sent").length, total: c.items.length })),
@@ -280,7 +350,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         photos: s.photos.filter(p => allowedPhotoIds.has(p.id))
           .map(p => ({ photoId: p.id, description: creativeContext.photoDescriptions[p.id] || "", name: p.name })),
         recentMessages: contextMessages(s).slice(-6).map(m => ({ role: m.role, text: m.text.slice(0, 650), photoIds: m.photoIds || [] })),
-        currentDraft: s.draft?.items || [], customerMessage: msg, selectedPhotos: input.photoIds }) }];
+        currentDraft: s.draft?.items || [], customerMessage: msg, selectedPhotos: onlyPreview ? preferredPhotoIds : input.photoIds }) }];
       if (Buffer.byteLength(content[0].text) > 40000) fail("context_limit", 413);
       for (const id of preferredPhotoIds) {
         if (creativeContext.photoDescriptions[id]) continue;
@@ -295,12 +365,14 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         const response = await fetchImpl("https://api.openai.com/v1/responses", { method: "POST", redirect: "error", signal: AbortSignal.timeout(90000),
           headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
           body: JSON.stringify({ model: MODEL, store: false, reasoning: { effort: "none" }, max_output_tokens: 6000,
-            instructions: INSTRUCTIONS, input: [{ role: "user", content }], text: { format: { type: "json_schema", name: "company_assistant", strict: true, schema: outputSchema } } }) });
+            instructions: INSTRUCTIONS + helpGuide(f.storyPackage) + (onlyPreview ? " O cliente pode criar uma imagem gratuita para baixar. Prepare no máximo uma imagem. Se pedir vídeo, diga que a primeira arte grátis é uma imagem. Oriente tocar em Criar arte grátis. A prévia não exige logo, Instagram, data ou horário." : ""),
+            input: [{ role: "user", content }], text: { format: { type: "json_schema", name: "company_assistant", strict: true, schema: outputSchema } } }) });
         const data = await response.json(); if (!response.ok || data.status && data.status !== "completed") fail("provider_unavailable", 503);
         const raw = (data.output || []).flatMap(v => v.content || []).filter(v => v.type === "output_text").map(v => v.text).join("");
-        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, f, allowedPhotoIds,
+        const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, creation, allowedPhotoIds,
           helpOnly ? { mode: "separate", photoIds: [] } : photoComposition);
-        const reply = conciseReply(helpOnly && out.items?.length ? "Me diga qual tela ou mensagem aparece para eu orientar o próximo passo." : out.reply, items.length);
+        const reply = onlyPreview && items.length ? "Sua arte está preparada. Toque em Criar arte grátis." :
+          conciseReply(helpOnly && out.items?.length ? "Me diga qual tela ou mensagem aparece para eu orientar o próximo passo." : out.reply, items.length);
         if (!reply) fail("provider_unavailable", 503);
         s = load(owner);
         const liveContext = ensureCreativeContext(s);
@@ -437,8 +509,8 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
       }
     } finally { running = false; }
   }
-  function start() { timer = setInterval(() => processPending().catch(() => {}), 15000); timer.unref(); queueMicrotask(() => processPending().catch(() => {})); }
-  function close() { stopped = true; if (timer) clearInterval(timer); }
-  return { state, upload, photo, message, confirm, report, processPending, start, close };
+  function start() { welcomeArt?.start(); timer = setInterval(() => processPending().catch(() => {}), 15000); timer.unref(); queueMicrotask(() => processPending().catch(() => {})); }
+  function close() { welcomeArt?.close(); stopped = true; if (timer) clearInterval(timer); }
+  return { state, upload, photo, message, confirm, report, preview, startPreview, previewImage, previewDownloaded, processPending, start, close };
 }
 module.exports = { createAssistantService, outputSchema, MODELS, MODEL };

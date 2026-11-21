@@ -476,7 +476,8 @@ test("photo-specific visual guidance stays with the correct photo in a multi-ima
 
 test("one-off Story balance reaches the chat, prepares Story-only and refuses a later Feed override",async t=>{
   const f=await fixture(t,{free:true,trialCount:0});
-  require("../src/billing/story-quota").credit(f.client,"synthetic-story-payment","synthetic-story-purchase","today");
+  const storyQuota = require("../src/billing/story-quota");
+  storyQuota.credit(f.client, "synthetic-story-payment", "synthetic-story-purchase", "today", storyQuota.LEGACY_STORY_PACKAGE.id);
   const s=await draft(f);
   assert.equal(s.storyImages,5);assert.equal(s.images,5);assert.equal(s.videos,0);
   assert.equal(s.draft.items[0].destination,"story");

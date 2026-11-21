@@ -11,6 +11,23 @@ function createAssistantRouter({ authenticate, service }) {
   router.post("/messages", call(req => service.message(req.user, req.body)));
   router.post("/confirm", call(req => service.confirm(req.user, req.body)));
   router.post("/report", call(req => service.report(req.user, req.body)));
+  router.get("/preview", call(req => service.preview(req.user)));
+  router.post("/preview", call(req => service.startPreview(req.user, req.body)));
+  router.post("/preview/downloaded", call(req => service.previewDownloaded(req.user)));
+  router.get("/preview/image", (req, res) => {
+    try {
+      const image = service.previewImage(req.user);
+      res.set("X-Content-Type-Options", "nosniff").attachment("iA4tube-arte-gratis.png");
+      image.on("error", () => {
+        if (res.headersSent) res.destroy();
+        else res.status(404).end();
+      });
+      res.on("close", () => image.destroy());
+      image.pipe(res);
+    } catch {
+      res.status(404).json({ ok: false, code: "assistant_preview_not_ready" });
+    }
+  });
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5*1024*1024, files:1, fields:2, parts:3, fieldSize:200 } }).single("image");
   router.post("/photos", (req,res,next) => upload(req,res,e => e ? res.status(400).json({ok:false,code:"assistant_photo_invalid"}) : next()),
     call(async req => { try { return await service.upload(req.user, req.body.id, req.file?.buffer, req.file?.originalname); } finally { if(req.file)req.file.buffer=undefined; } }));

@@ -7,6 +7,8 @@ const storyQuota = require("../billing/story-quota");
 const { reservationAllocation, allocationUnits, matchesAllocation } = require("./media-allocation");
 const { admissionInput, admissionOrderId, statusInput, cancelInput, hash, canonicalJson, fail, UUID, HASH } = require("./admission-contract");
 const FREE_FIELDS = ["arte_gratis_disponivel", "arte_gratis_usada", "arte_gratis_usada_em", "arte_gratis_pedido_id", "arte_gratis_criada_em"];
+const INSTAGRAM_BONUS_LIMIT = 5;
+const multiImageClaim = claim => [3, INSTAGRAM_BONUS_LIMIT].includes(claim?.limit);
 function legacyConsumed(client) {
   return Boolean(client && typeof client === "object" && (client.arte_gratis_usada === true || Boolean(client.arte_gratis_pedido_id) ||
     (Array.isArray(client.arte_gratis_usos) && client.arte_gratis_usos.length > 0)));
@@ -19,6 +21,8 @@ function createEditAdmissionService(ports) {
   const { root, contextFile, claimFile, read, write, directories, acquireLock, ownerClient, ticketContext,
     billingDigest, planningRoot, orderRoot, clock, fault, observeConnection, currentFreeArtBlocked, recordFreeArtUse, canReuseCancelledFreeArt, secret } = ports;
   const enabled = ports.enabled === true;
+  const instagramBonusFor = typeof ports.instagramBonusEnabled === "function"
+    ? ports.instagramBonusEnabled : () => ports.instagramBonusEnabled === true;
   const key = crypto.createHmac("sha256", secret).update("edit-free-image-ledger-v1").digest();
   const fingerprint = (purpose, value) => crypto.createHmac("sha256", key).update(`${purpose}\n${value}`).digest("hex");
   const ledgerFile = path.join(root, "free-image-ledger.json");
@@ -42,7 +46,9 @@ function createEditAdmissionService(ports) {
       requestHash: value.requestHash, contextHash: value.contextHash, mediaKind: value.mediaKind, quantity: 1,
       // A frozen producer binding is already fenced against cancellation/re-approval, including crash recovery.
       state: value.state === "reserved" && row.binding ? "bound" : value.state,
-      reservedAt: value.reservedAt, planningId: row.planningId, pedidoId: row.pedidoId };
+      reservedAt: value.reservedAt, planningId: row.planningId, pedidoId: row.pedidoId,
+      ...(value.freeClaim?.limit === INSTAGRAM_BONUS_LIMIT && value.reservation?.free === 1 &&
+        ["reserved", "bound"].includes(value.state) ? { imageBenefit: "instagram_bonus" } : {}) };
   }
   function response(row) { return { ok: true, admission: wire(row) }; }
   function inputIdentity(request) { const { ticket, ...value } = request; return hash(canonicalJson(value)); }
@@ -53,7 +59,7 @@ function createEditAdmissionService(ports) {
     if (!existing) write(claimFile(row.admission.editOrderId), identity);
   }
   // Shared observation predicate. It never creates a grant, migrates the ledger, writes or reserves.
-  // A trusted assistant context may use three trial images in total, including the old one.
+  // Previously used connection credits count toward the current allowance.
   // The same owner/Instagram ledger fences all requests; paid balances and videos are untouched.
   function inspectAssistantTrial(owner, client, connection, value, admissionId = null) {
     if (!confirmedInstagram(connection) || billing.getFreeArtStatus(structuredClone(client)).arte_gratis_ativa !== true) return null;
@@ -65,8 +71,9 @@ function createEditAdmissionService(ports) {
     const active = Object.values(entry?.assistantClaims || {}).filter(c => c.state !== "available").length;
     const used = Math.max(legacyUsed + active, Array.isArray(client.arte_gratis_usos) ? client.arte_gratis_usos.length : 0, Number(legacyConsumed(client)));
     const current = admissionId && entry?.assistantClaims?.[admissionId];
-    if (used >= 3 && !current) return null;
-    return { ownerKey, instagramKey, limit: 3, legacyUsed, remaining: Math.max(0, 3 - used) };
+    const limit = instagramBonusFor(owner) ? INSTAGRAM_BONUS_LIMIT : 3;
+    if (used >= limit && !current) return null;
+    return { ownerKey, instagramKey, limit, legacyUsed, remaining: Math.max(0, limit - used) };
   }
   async function assistantTrialRemaining(claims) {
     if (!enabled || typeof observeConnection !== "function") return 0;
@@ -87,9 +94,12 @@ function createEditAdmissionService(ports) {
     return { ownerKey, instagramKey, grandfather: client.arte_gratis_disponivel === true };
   }
   function freeClaim(row, connection, current) {
-    if (row.assistantTrial === true && row.admission.mediaKind === "image")
+    if (row.admission.mediaKind !== "image") return null;
+    const instagramBonus = instagramBonusFor(row.owner);
+    if (instagramBonus && row.request.destination === "story" && storyQuota.remaining(current.client) > 0) return null;
+    if (instagramBonus || row.assistantTrial === true)
       return inspectAssistantTrial(row.owner, current.client, connection, ledger(), row.admission.admissionId);
-    if (row.admission.mediaKind !== "image" || !confirmedInstagram(connection) || legacyConsumed(current.client)) return null;
+    if (!confirmedInstagram(connection) || legacyConsumed(current.client)) return null;
     const value = ledger(); let migrated = false;
     // Conservative, idempotent migration under the same allocation lock. Keep a consumed owner fingerprint
     // even if a later account rewrite drops legacy flags; never reissue or rewrite an existing allocation.
@@ -118,6 +128,11 @@ function createEditAdmissionService(ports) {
     return { storyCount: storyQuota.remaining(copy), image: image + standalone + storyQuota.remaining(copy) >= 1, video: video + standalone >= 1,
       imageCount: image + standalone, videoCount: video + standalone, freeFeature: status.arte_gratis_ativa === true };
   }
+  function remainingFreeImages(current, connection, policy) {
+    if (instagramBonusFor(current.owner)) return inspectAssistantTrial(current.owner, current.client, connection, ledger())?.remaining || 0;
+    return Number(Boolean(inspectFreeClaim(current.owner, current.client, connection, ledger(),
+      { ipIdentity: policy.ipIdentity, blocked: policy.freeArtBlocked === true })));
+  }
   // A read-only hint for the new photo list. It never creates/migrates a free grant.
   // The legacy availability wire format remains unchanged for installed Android apps.
   async function remainingVideos({ owner }) {
@@ -127,7 +142,7 @@ function createEditAdmissionService(ports) {
     let current = ownerClient({ whatsapp: owner }), measured;
     try { measured = readPaidAvailability(current.client); } catch { return null; }
     const storyCount = destination === null || destination === "story" ? measured.storyCount : 0;
-    if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount + storyCount;
+    if (!measured.freeFeature || !instagramBonusFor(current.owner) && legacyConsumed(current.client)) return measured.imageCount + storyCount;
     if (!verifiedClaims || typeof observeConnection !== "function") return null;
     let connection;
     try { connection = await observeConnection(verifiedClaims); } catch { return null; }
@@ -135,10 +150,9 @@ function createEditAdmissionService(ports) {
     current = ownerClient({ whatsapp: owner });
     try {
       measured = readPaidAvailability(current.client);
-      if (!measured.freeFeature || legacyConsumed(current.client)) return measured.imageCount + (destination === null || destination === "story" ? measured.storyCount : 0);
-      const free = inspectFreeClaim(owner, current.client, connection, ledger(),
-        { ipIdentity, blocked: freeArtBlocked });
-      return measured.imageCount + (destination === null || destination === "story" ? measured.storyCount : 0) + Number(Boolean(free));
+      const paidCount = measured.imageCount + (destination === null || destination === "story" ? measured.storyCount : 0);
+      if (!measured.freeFeature || !instagramBonusFor(current.owner) && legacyConsumed(current.client)) return paidCount;
+      return paidCount + remainingFreeImages(current, connection, { ipIdentity, freeArtBlocked });
     } catch { return null; }
   }
   async function availability(claims, policy = {}) {
@@ -148,7 +162,7 @@ function createEditAdmissionService(ports) {
     try { measured = readPaidAvailability(current.client); }
     catch { return availabilityResponse(null, null); }
     if (measured.image) return availabilityResponse(true, measured.video);
-    if (!measured.freeFeature || legacyConsumed(current.client)) return availabilityResponse(false, measured.video);
+    if (!measured.freeFeature || !instagramBonusFor(current.owner) && legacyConsumed(current.client)) return availabilityResponse(false, measured.video);
     let connection = null, observationFailed = typeof observeConnection !== "function";
     try { if (!observationFailed) connection = await observeConnection(claims); }
     catch { observationFailed = true; }
@@ -156,17 +170,16 @@ function createEditAdmissionService(ports) {
     try { current = ownerClient(claims); measured = readPaidAvailability(current.client); }
     catch (error) { if (error.statusCode === 401) throw error; return availabilityResponse(null, null); }
     if (measured.image) return availabilityResponse(true, measured.video);
-    if (!measured.freeFeature || legacyConsumed(current.client)) return availabilityResponse(false, measured.video);
+    if (!measured.freeFeature || !instagramBonusFor(current.owner) && legacyConsumed(current.client)) return availabilityResponse(false, measured.video);
     if (observationFailed) return availabilityResponse(null, measured.video);
     try {
-      return availabilityResponse(Boolean(inspectFreeClaim(current.owner, current.client, connection, ledger(),
-        { ipIdentity: policy.ipIdentity, blocked: policy.freeArtBlocked === true })), measured.video);
+      return availabilityResponse(remainingFreeImages(current, connection, policy) > 0, measured.video);
     } catch { return availabilityResponse(null, measured.video); }
   }
   function reserveFreeClaim(row) {
     const claim = row.admission.freeClaim;
     if (!claim) return;
-    if (claim.limit === 3) {
+    if (multiImageClaim(claim)) {
       const value = ledger(), prior = value.owners[claim.ownerKey];
       if (value.instagram[claim.instagramKey] && value.instagram[claim.instagramKey] !== claim.ownerKey ||
           prior?.instagramKey && prior.instagramKey !== claim.instagramKey) fail("allocation_reconciliation_required", 503);
@@ -191,7 +204,7 @@ function createEditAdmissionService(ports) {
     const claim = row.admission?.freeClaim;
     if (!claim) return;
     const value = ledger(), prior = value.owners[claim.ownerKey];
-    if (claim.limit === 3) {
+    if (multiImageClaim(claim)) {
       const entry = prior?.assistantClaims?.[row.admission.admissionId];
       if (!entry || prior.instagramKey !== claim.instagramKey) fail("allocation_reconciliation_required", 503);
       entry.state = state; write(ledgerFile, value); return;
@@ -227,7 +240,7 @@ function createEditAdmissionService(ports) {
         externalEdit: { kind: "edit_calendar_admission_v1", contextId: row.id, editOrderId: value.editOrderId,
           requestHash: value.requestHash, admissionId: value.admissionId, mediaKind: value.mediaKind }, freeArtBlocked: !value.freeClaim,
         instagramFreeClaim: Boolean(value.freeClaim),
-        instagramFreeClaimLimit: value.freeClaim?.limit === 3 ? 3 : 1,
+        instagramFreeClaimLimit: value.freeClaim?.limit || 1,
         calendarAuthorizationFactory: () => row.envelope });
       fault("admission_after_request");
       writeClients(current.clients);
@@ -239,7 +252,8 @@ function createEditAdmissionService(ports) {
     value.reservation = reservationAllocation(reservation);
     if (allocationUnits(value.reservation) !== 1 ||
         value.reservation.mediaQuota && value.reservation.mediaQuota.mediaKind !== value.mediaKind) fail("allocation_reconciliation_required", 503);
-    if (value.reservation.free && row.ipIdentity && recordFreeArtUse({ owner: row.owner, planningId: row.planningId, ipIdentity: row.ipIdentity }) !== true)
+    if (value.reservation.free && value.freeClaim?.limit !== INSTAGRAM_BONUS_LIMIT && row.ipIdentity &&
+        recordFreeArtUse({ owner: row.owner, planningId: row.planningId, ipIdentity: row.ipIdentity }) !== true)
       fail("free_art_receipt_unconfirmed", 503);
     if (!value.reservation.free && value.freeClaim) {
       finishFreeClaim(row, "available"); delete value.freeClaim;
@@ -277,7 +291,8 @@ function createEditAdmissionService(ports) {
     assertEnabled(); const request = admissionInput(input);
     const { row: initial, current: before } = inspectCapability(request);
     let connection = null;
-    if ((!initial.admission || initial.admission.state === "allocating") && initial.phase !== "bound" && request.mediaKind === "image" && (!legacyConsumed(before.client) || initial.assistantTrial === true) &&
+    if ((!initial.admission || initial.admission.state === "allocating") && initial.phase !== "bound" && request.mediaKind === "image" &&
+        (instagramBonusFor(initial.owner) || initial.admission?.freeClaim || !legacyConsumed(before.client) || initial.assistantTrial === true) &&
         !billing.hasAvailablePlanArt(before.client) && typeof observeConnection === "function") {
       // Observational existing service only. No provider call, OAuth transition or calendar synchronization.
       try { connection = await observeConnection(initial.sessionIdentity); }
@@ -399,11 +414,25 @@ function createEditAdmissionService(ports) {
       current.client.artes_avulsas_consumos = (current.client.artes_avulsas_consumos || []).filter(item => item.planejamento_id !== row.planningId);
     }
     if (allocation.free) {
-      if (current.client.arte_gratis_pedido_id !== row.planningId) fail("allocation_reconciliation_required", 503);
-      for (const field of FREE_FIELDS) {
-        if (Object.hasOwn(value.freeBefore, field)) current.client[field] = value.freeBefore[field]; else delete current.client[field];
+      const client = current.client;
+      const uses = client.arte_gratis_usos || [];
+      if (value.freeClaim?.limit === INSTAGRAM_BONUS_LIMIT) {
+        if (!uses.some(item => item.pedido_id === row.planningId)) fail("allocation_reconciliation_required", 503);
+        client.arte_gratis_usos = uses.filter(item => item.pedido_id !== row.planningId);
+        if (client.arte_gratis_pedido_id === row.planningId) {
+          const latest = client.arte_gratis_usos.at(-1);
+          client.arte_gratis_usada = Boolean(latest || value.freeClaim.legacyUsed);
+          client.arte_gratis_disponivel = false;
+          client.arte_gratis_pedido_id = latest?.pedido_id || "";
+          client.arte_gratis_usada_em = latest?.consumido_em || "";
+        }
+      } else {
+        if (client.arte_gratis_pedido_id !== row.planningId) fail("allocation_reconciliation_required", 503);
+        for (const field of FREE_FIELDS) {
+          if (Object.hasOwn(value.freeBefore, field)) client[field] = value.freeBefore[field]; else delete client[field];
+        }
+        client.arte_gratis_usos = uses.filter(item => item.pedido_id !== row.planningId);
       }
-      current.client.arte_gratis_usos = (current.client.arte_gratis_usos || []).filter(item => item.pedido_id !== row.planningId);
       if (current.client.ciclo_mes === allocation.cycle)
         current.client.usados_no_ciclo = Math.max(0, Number(current.client.usados_no_ciclo || 0) - 1);
     }
@@ -444,4 +473,4 @@ function createEditAdmissionService(ports) {
     claimIdentity(row) { return { schema: 2, contextId: row.id, admissionId: row.admission.admissionId, requestHash: row.admission.requestHash }; },
     close() { key.fill(0); } });
 }
-module.exports = { createEditAdmissionService, legacyConsumed, confirmedInstagram };
+module.exports = { createEditAdmissionService, legacyConsumed, confirmedInstagram, INSTAGRAM_BONUS_LIMIT };
