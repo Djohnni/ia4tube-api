@@ -7,7 +7,7 @@ function createAssistantRouter({ authenticate, service }) {
     const status = [400,401,402,403,404,409,413,422,429,503].includes(e.statusCode) ? e.statusCode : 503;
     res.status(status).json({ ok: false, code: /^assistant_[a-z_]+$/.test(e.code || "") ? e.code : "assistant_unavailable" });
   } };
-  router.get("/", call(req => service.state(req.user)));
+  router.get("/", call(req => service.state(req.user, { androidVersion: req.get("X-IA4tube-Android-Version") })));
   router.post("/messages", call(req => service.message(req.user, req.body)));
   router.post("/confirm", call(req => service.confirm(req.user, req.body)));
   router.post("/report", call(req => service.report(req.user, req.body)));

@@ -8,9 +8,12 @@ const path = require("node:path");
 const test = require("node:test");
 const { setTimeout: delay } = require("node:timers/promises");
 const sharp = require("sharp");
+const express = require("express");
 const { createAssistantService } = require("../src/company-assistant/service");
+const { createAssistantRouter } = require("../src/company-assistant/router");
 const { createWelcomeArt } = require("../src/company-assistant/welcome-art");
 const { createPromoRollout } = require("../src/billing/promo-rollout");
+const { createProductionSession } = require("../src/social/production-session");
 
 const owner = "synthetic-welcome-art-owner";
 const claims = { whatsapp: owner, company_id: owner, token_version: 2 };
@@ -23,6 +26,76 @@ async function waitFor(predicate) {
   }
   assert.fail("Expected welcome art state did not arrive");
 }
+
+test("only an active authenticated session on the configured Android version enrolls, once per account across restarts", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-welcome-enrollment-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const env = { IA4TUBE_WELCOME_ART_ENABLED: "true", IA4TUBE_WELCOME_ART_TEST_VERSION: "117",
+    IA4TUBE_PROMO_INTERNAL_ACCOUNTS: "old-test-owner" };
+  const enrollment = { internalWelcomeRoot: path.join(root, "enrollment") };
+  const rollout = createPromoRollout(env, enrollment);
+  const clients = { alpha: { ativo: true }, beta: { ativo: true }, public: { ativo: true },
+    inactive: { ativo: false }, unfinished: { ativo: true, cadastro_automatico: true, conta_finalizada: false } };
+  const session = createProductionSession({ secret: "synthetic-welcome-test-secret-not-a-live-key", readClients: () => clients });
+  const app = express();
+  const service = createAssistantService({ root: path.join(root, "chat"), welcomeArtRoot: path.join(root, "art"),
+    welcomeArtFor: rollout.welcomeArtFor, enrollWelcomeArtFor: rollout.enrollWelcomeArtFor,
+    readClient: id => clients[id], apiKey: "synthetic-test-key", profile: { get: () => ({}) },
+    calendar: { availability: async () => ({ availability: { canImage: false } }) }, observeConnection: async () => null });
+  app.use(createAssistantRouter({ authenticate: session.authenticate, service }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve, reject) => { server.once("listening", resolve); server.once("error", reject); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = `http://127.0.0.1:${server.address().port}/`;
+  async function state(id, version) {
+    const headers = {};
+    if (id) headers.Authorization = `Bearer ${session.sign(id)}`;
+    if (version) headers["X-IA4tube-Android-Version"] = version;
+    const response = await fetch(url, { headers });
+    return { status: response.status, data: await response.json() };
+  }
+  assert.equal((await state(null, "117")).status, 401);
+  assert.equal((await state("inactive", "117")).status, 401);
+  assert.equal((await state("unfinished", "117")).status, 401);
+  for (const version of [undefined, "113", "117, 117", "119"]) {
+    const publicState = await state("public", version);
+    assert.equal(publicState.status, 200);
+    assert.equal(Object.hasOwn(publicState.data, "preview"), false);
+  }
+  assert.equal(fs.existsSync(enrollment.internalWelcomeRoot), false);
+  for (const id of ["alpha", "beta"]) {
+    assert.equal((await state(id, "117")).data.preview.status, "available");
+    assert.equal((await state(id, "117")).data.preview.status, "available");
+  }
+  const markers = fs.readdirSync(enrollment.internalWelcomeRoot);
+  assert.equal(markers.length, 2);
+  assert.ok(markers.every(marker => /^[a-f0-9]{64}$/.test(marker)));
+  const restarted = createPromoRollout(env, enrollment);
+  for (const id of ["alpha", "beta"]) {
+    assert.equal(restarted.welcomeArtFor(id), true);
+    assert.equal(restarted.storyPackageFor(id).quantity, 5);
+  }
+  assert.equal(restarted.welcomeArtFor("public"), false);
+  assert.equal(restarted.welcomeArtFor("old-test-owner"), true);
+  assert.equal(restarted.storyPackageFor("old-test-owner").quantity, 10);
+  assert.equal(createPromoRollout({ ...env, IA4TUBE_WELCOME_ART_TEST_VERSION: "" }, enrollment).welcomeArtFor("alpha"), false);
+});
+
+test("a failure to save promotion enrollment leaves the regular chat available", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-enrollment-failure-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const badRoot = path.join(root, "not-a-directory");
+  fs.writeFileSync(badRoot, "blocked");
+  const rollout = createPromoRollout({ IA4TUBE_WELCOME_ART_ENABLED: "true", IA4TUBE_WELCOME_ART_TEST_VERSION: "117" },
+    { internalWelcomeRoot: badRoot });
+  const service = createAssistantService({ root: path.join(root, "chat"), welcomeArtRoot: path.join(root, "art"),
+    welcomeArtFor: rollout.welcomeArtFor, enrollWelcomeArtFor: rollout.enrollWelcomeArtFor,
+    readClient: () => ({ ativo: true }), profile: { get: () => ({}) },
+    calendar: { availability: async () => ({ availability: { canImage: false } }) }, observeConnection: async () => null });
+  const state = await service.state(claims, { androidVersion: "117" });
+  assert.equal(state.ok, true);
+  assert.equal(Object.hasOwn(state, "preview"), false);
+});
 
 test("first free art can be downloaded without an Instagram, logo, calendar, or duplicate generation", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-welcome-art-"));

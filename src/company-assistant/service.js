@@ -86,7 +86,7 @@ function conciseReply(value, itemCount = 0) {
 
 function createAssistantService({ root, readClient, profile, calendar, observeConnection, apiKey, fetchImpl = globalThis.fetch,
   clock = Date.now, enabled = true, submitFetch = globalThis.fetch, dispatchSpacingMs = 4500, listReferralPartners = () => [],
-  welcomeArtRoot = null, welcomeArtFetch = globalThis.fetch, welcomeArtFor = () => false,
+  welcomeArtRoot = null, welcomeArtFetch = globalThis.fetch, welcomeArtFor = () => false, enrollWelcomeArtFor = () => {},
   storyPackageFor = () => storyQuota.LEGACY_STORY_PACKAGE }) {
   const busy = new Set(), rates = new Map(); let stopped = false, timer = null, running = false;
   const referrals = createReferralStore(root, listReferralPartners);
@@ -154,8 +154,10 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     }
   }
   const beforeFirstConversation = s => s.messages.length === 0 && !s.draft && s.campaigns.length === 0;
-  async function state(claims) {
+  async function state(claims, { androidVersion } = {}) {
     const { owner, client } = session(claims);
+    try { enrollWelcomeArtFor(owner, androidVersion); }
+    catch { /* Failure to register the promotion must not interrupt the chat. */ }
     const f = await facts(claims);
     const s = load(owner);
     return wire(s, f, referralFor(client, owner, beforeFirstConversation(s)));

@@ -24,7 +24,6 @@ const orderStatus = require("./src/orders/order.status");
 const orderService = require("./src/orders/order.service");
 const billingService = require("./src/billing/billing.service");
 const billingPlans = require("./src/billing/plans");
-const promoRollout = require("./src/billing/promo-rollout").createPromoRollout();
 const { buildReferralReport } = require("./src/company-assistant/referral-report");
 const { createReferralPartnerDirectory } = require("./src/company-assistant/referral-partners");
 const { assertPixIssuanceAllowed, sendBlockedPixError } = require("./src/billing/pix-account-policy");
@@ -90,6 +89,9 @@ const productionSession = createProductionSession({ secret: JWT_SECRET, readClie
 
 // ===== DATA STORAGE (RENDER DISK) =====
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "dados");
+const promoRollout = require("./src/billing/promo-rollout").createPromoRollout(process.env, {
+  internalWelcomeRoot: path.join(DATA_DIR, "private", "company_welcome_enrollment")
+});
 const ASSISTANT_DIR = path.join(DATA_DIR, "company_assistant_v1");
 const referralPartners = createReferralPartnerDirectory({
   root: ASSISTANT_DIR,
@@ -4220,6 +4222,7 @@ const companyAssistant = require("./src/company-assistant/service").createAssist
   root: ASSISTANT_DIR,
   welcomeArtRoot: promoRollout.startWelcomeArt ? path.join(DATA_DIR, "private", "company_welcome_art") : null,
   welcomeArtFor: promoRollout.welcomeArtFor,
+  enrollWelcomeArtFor: promoRollout.enrollWelcomeArtFor,
   storyPackageFor: promoRollout.storyPackageFor,
   listReferralPartners: referralPartners.list,
   enabled: process.env.IA4TUBE_ASSISTANT_ENABLED !== "false",
