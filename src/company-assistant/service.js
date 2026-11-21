@@ -14,6 +14,7 @@ const { PENDING_NOTICE, isNewArtCommand, clearUnsentPreparation } = require("./p
 const { ensureCreativeContext, appendContextMessages, contextMessages, closeCreativeContext } = require("./creative-context");
 const { createReferralStore } = require("./referral");
 const { createWelcomeArt } = require("./welcome-art");
+const { buildWelcomeArtPrompt } = require("./welcome-art-prompt");
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const RECEIVER = "https://marcagrande-pedidos-wshgj6ugza-uc.a.run.app/orders";
 const MODELS = { image: "73f8a30b-6cb5-4f82-9e11-6e325941f590", video: "d0591ca4-1c6a-470a-9f78-57ba4d266b8c" };
@@ -217,16 +218,7 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
     }
     const photos = sourceIds(item).map(id => photo(claims, id));
     const logo = profile.get(owner)?.profile?.has_logo === true ? profile.logo(owner) : null;
-    const instructions = [
-      "Crie uma única arte promocional vertical, com acabamento profissional no estilo iA4tube.",
-      "Use como referência as fotos anexadas. Preserve os produtos, as características e as quantidades que aparecem nas fotos.",
-      logo ? "A última imagem é a logo da empresa. Integre-a ao design sem modificar sua escrita ou seu símbolo." : "Crie a arte sem inventar marca ou logo.",
-      "Use os dados do pedido abaixo como referência visual. Não acrescente preços, ofertas, nomes de empresa, selos ou fatos que o cliente não forneceu.",
-      item.segment && item.segment !== "auto" ? `Segmento: ${item.segment}` : "",
-      item.visualInstructions ? `Orientação visual: ${item.visualInstructions}` : "",
-      item.imageText ? `Texto exato que deve aparecer na arte: ${item.imageText}` : "",
-      "Mantenha os textos legíveis, com bom contraste e margens. Equilibre a composição sem poluir. Entregue somente a arte."
-    ].filter(Boolean).join("\n");
+    const instructions = buildWelcomeArtPrompt({ clientRequest: d.clientRequest, item, photoCount: photos.length });
     const result = welcomeArt.reserve(key, { ...input, owner, photos, logo, instructions });
     const remaining = d.items.filter(row => row.id !== item.id);
     if (remaining.length) s.draft = { ...d, version: d.version + 1, items: remaining };
@@ -367,13 +359,14 @@ function createAssistantService({ root, readClient, profile, calendar, observeCo
         const response = await fetchImpl("https://api.openai.com/v1/responses", { method: "POST", redirect: "error", signal: AbortSignal.timeout(90000),
           headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
           body: JSON.stringify({ model: MODEL, store: false, reasoning: { effort: "none" }, max_output_tokens: 6000,
-            instructions: INSTRUCTIONS + helpGuide(f.storyPackage) + (onlyPreview ? " O cliente pode criar uma imagem gratuita para baixar. Prepare no máximo uma imagem. Se pedir vídeo, diga que a primeira arte grátis é uma imagem. Oriente tocar em Criar arte grátis. A prévia não exige logo, Instagram, data ou horário." : ""),
+            instructions: INSTRUCTIONS + helpGuide(f.storyPackage) + (onlyPreview ? " O cliente pode criar uma imagem gratuita para baixar. Prepare no máximo uma imagem. Se pedir vídeo, diga que a primeira arte grátis é uma imagem. A arte exige a logo da empresa. Com hasLogo falso, oriente tocar em Adicionar logo depois de preparar o pedido; com logo, oriente tocar em Criar arte grátis. A arte grátis para baixar não exige Instagram, data ou horário." : ""),
             input: [{ role: "user", content }], text: { format: { type: "json_schema", name: "company_assistant", strict: true, schema: outputSchema } } }) });
         const data = await response.json(); if (!response.ok || data.status && data.status !== "completed") fail("provider_unavailable", 503);
         const raw = (data.output || []).flatMap(v => v.content || []).filter(v => v.type === "output_text").map(v => v.text).join("");
         const out = JSON.parse(raw), items = validateItems(helpOnly ? [] : out.items, s, creation, allowedPhotoIds,
           helpOnly ? { mode: "separate", photoIds: [] } : photoComposition);
-        const reply = onlyPreview && items.length ? "Sua arte está preparada. Toque em Criar arte grátis." :
+        const reply = onlyPreview && items.length ? (f.hasLogo ? "Sua arte está preparada. Toque em Criar arte grátis." :
+          "Sua arte está preparada. Toque em Adicionar logo para criar.") :
           conciseReply(helpOnly && out.items?.length ? "Me diga qual tela ou mensagem aparece para eu orientar o próximo passo." : out.reply, items.length);
         if (!reply) fail("provider_unavailable", 503);
         s = load(owner);

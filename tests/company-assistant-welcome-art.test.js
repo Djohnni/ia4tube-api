@@ -30,7 +30,7 @@ async function waitFor(predicate) {
 test("only an active authenticated session on the configured Android version enrolls, once per account across restarts", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-welcome-enrollment-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const env = { IA4TUBE_WELCOME_ART_ENABLED: "true", IA4TUBE_WELCOME_ART_TEST_VERSION: "117",
+  const env = { IA4TUBE_WELCOME_ART_ENABLED: "true", IA4TUBE_WELCOME_ART_TEST_VERSION: "117,118",
     IA4TUBE_PROMO_INTERNAL_ACCOUNTS: "old-test-owner" };
   const enrollment = { internalWelcomeRoot: path.join(root, "enrollment") };
   const rollout = createPromoRollout(env, enrollment);
@@ -63,9 +63,9 @@ test("only an active authenticated session on the configured Android version enr
     assert.equal(Object.hasOwn(publicState.data, "preview"), false);
   }
   assert.equal(fs.existsSync(enrollment.internalWelcomeRoot), false);
-  for (const id of ["alpha", "beta"]) {
-    assert.equal((await state(id, "117")).data.preview.status, "available");
-    assert.equal((await state(id, "117")).data.preview.status, "available");
+  for (const [id, version] of [["alpha", "117"], ["beta", "118"]]) {
+    assert.equal((await state(id, version)).data.preview.status, "available");
+    assert.equal((await state(id, version)).data.preview.status, "available");
   }
   const markers = fs.readdirSync(enrollment.internalWelcomeRoot);
   assert.equal(markers.length, 2);
@@ -97,12 +97,14 @@ test("a failure to save promotion enrollment leaves the regular chat available",
   assert.equal(Object.hasOwn(state, "preview"), false);
 });
 
-test("first free art can be downloaded without an Instagram, logo, calendar, or duplicate generation", async t => {
+test("first free art requires a company logo, preserves the draft and downloads without Instagram or calendar", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ia4tube-welcome-art-"));
   const photoId = uuid();
   const inputs = [];
   const png = await sharp({ create: { width: 70, height: 50, channels: 3, background: "red" } }).png().toBuffer();
+  const logoPng = await sharp({ create: { width: 45, height: 45, channels: 4, background: "blue" } }).png().toBuffer();
   const rendered = await sharp({ create: { width: 1024, height: 1536, channels: 3, background: "green" } }).png().toBuffer();
+  let logo = null;
   const internal = createPromoRollout({ IA4TUBE_PROMO_INTERNAL_ACCOUNTS: owner, IA4TUBE_WELCOME_ART_ENABLED: "true" });
   const client = { ativo: true };
   const parsedDraft = { reply: "Sua arte está preparada.", photoDescriptions: [],
@@ -112,7 +114,7 @@ test("first free art can be downloaded without an Instagram, logo, calendar, or 
     root: path.join(root, "chat"), welcomeArtRoot: path.join(root, "private"),
     welcomeArtFor: internal.welcomeArtFor, storyPackageFor: internal.storyPackageFor,
     apiKey: "synthetic-test-key", readClient: key => key === owner ? client : { ativo: true },
-    profile: { get: () => ({ profile: { has_logo: false } }), logo: () => assert.fail("logo not required") },
+    profile: { get: () => ({ profile: { has_logo: Boolean(logo) } }), logo: () => logo },
     calendar: { availability: async () => ({ availability: { canImage: false } }),
       createContext: () => assert.fail("calendar path invoked") },
     observeConnection: async () => null,
@@ -141,8 +143,14 @@ test("first free art can be downloaded without an Instagram, logo, calendar, or 
   await service.upload(claims, photoId, png, "foto.png");
   const state = await service.message(claims, { requestId: uuid(), message: "Crie uma oferta por R$ 39,90.", photoIds: [photoId], previewEnabled: true });
   assert.equal(state.draft.items[0].photoId, photoId);
+  assert.match(state.messages.at(-1).text, /Adicionar logo/);
   const request = { draftId: state.draft.id, revision: state.draft.version, photoId };
   assert.throws(() => service.startPreview(claims, { ...request, model: "override" }), { code: "assistant_input_invalid" });
+  assert.throws(() => service.startPreview(claims, request), { code: "assistant_logo_required", statusCode: 422 });
+  assert.equal(inputs.length, 0);
+  assert.equal((await service.state(claims)).draft.id, request.draftId);
+  assert.equal(service.preview(claims).preview.status, "available");
+  logo = logoPng;
   assert.equal(service.startPreview(claims, request).preview.status, "queued");
   service.startPreview(claims, request);
   await waitFor(() => service.preview(claims).preview.status === "ready");
@@ -150,8 +158,12 @@ test("first free art can be downloaded without an Instagram, logo, calendar, or 
   assert.equal(inputs[0].get("model"), "gpt-image-2.5-sunburst");
   assert.equal(inputs[0].get("quality"), "low");
   assert.equal(inputs[0].get("size"), "1024x1536");
+  assert.equal(inputs[0].get("background"), "opaque");
   assert.match(inputs[0].get("prompt"), /R\$ 39,90/);
-  assert.equal(inputs[0].getAll("image[]").length, 1);
+  assert.match(inputs[0].get("prompt"), /cenário ou fundo trabalhado/);
+  assert.deepEqual(inputs[0].getAll("image[]").map(f => f.name), ["foto-1.png", "logo.png"]);
+  logo = null;
+  assert.equal(service.startPreview(claims, request).preview.status, "ready");
   const chunks = [];
   for await (const chunk of service.previewImage(claims)) chunks.push(chunk);
   const dimensions = await sharp(Buffer.concat(chunks)).metadata();
@@ -176,7 +188,7 @@ test("uncertain image generation is preserved across restart and makes no furthe
   const worker = createWelcomeArt(options);
   const recovered = createWelcomeArt(options);
   t.after(() => { worker.close(); recovered.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  const job = { owner, draftId: uuid(), revision: 1, photoId: uuid(), photos: [photo], instructions: "Texto sintético" };
+  const job = { owner, draftId: uuid(), revision: 1, photoId: uuid(), photos: [photo], logo: photo, instructions: "Texto sintético" };
   worker.reserve(key, job);
   worker.start();
   await waitFor(() => worker.state(key).status === "unavailable");

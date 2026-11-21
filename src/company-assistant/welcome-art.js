@@ -47,6 +47,7 @@ function createWelcomeArt({ root, apiKey, fetchImpl = globalThis.fetch, canRun =
       return state(key);
     }
     if (!apiKey) fail("preview_unavailable", 503);
+    if (!Buffer.isBuffer(logo) || !logo.length) fail("logo_required", 422);
     if (!photos.length || photos.length > 4) fail("photo_invalid", 400);
     fs.mkdirSync(directory(key), { recursive: true, mode: 0o700 });
     const sources = photos.map((photo, index) => {
@@ -54,10 +55,8 @@ function createWelcomeArt({ root, apiKey, fetchImpl = globalThis.fetch, canRun =
       fs.writeFileSync(path.join(directory(key), filename), photo, { mode: 0o600 });
       return filename;
     });
-    if (logo) {
-      fs.writeFileSync(path.join(directory(key), "logo.png"), logo, { mode: 0o600 });
-      sources.push("logo.png");
-    }
+    fs.writeFileSync(path.join(directory(key), "logo.png"), logo, { mode: 0o600 });
+    sources.push("logo.png");
     const job = { owner, draftId, revision, photoId, sources, instructions, status: "queued" };
     atomicWriteJson(receipt(key), job);
     queued.set(key, job);
@@ -86,6 +85,7 @@ function createWelcomeArt({ root, apiKey, fetchImpl = globalThis.fetch, canRun =
       form.set("quality", "low");
       form.set("size", `${WIDTH}x${HEIGHT}`);
       form.set("output_format", "png");
+      form.set("background", "opaque");
       form.set("n", "1");
       form.set("prompt", job.instructions);
       for (const source of job.sources) {
